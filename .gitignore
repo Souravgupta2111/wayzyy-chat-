@@ -1,0 +1,27 @@
+# Secrets — never commit API keys
+Secrets.json
+WayzyyChat/Secrets.json
+*.xcconfig
+.env
+
+# Xcode
+build/
+DerivedData/
+*.xcuserstate
+xcuserdata/
+*.moved-aside
+*.hmap
+*.ipa
+*.dSYM.zip
+*.dSYM
+
+# macOS
+.DS_Store
+
+# Verification harness binaries and SwiftPM build products
+.verify/
+.build/
+*.o
+
+# Local model probe scratch
+/tmp_probe*
