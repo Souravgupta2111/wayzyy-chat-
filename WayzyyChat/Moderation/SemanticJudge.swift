@@ -549,22 +549,7 @@ final class RemoteJudge: SemanticJudge {
         urlRequest.httpBody = try? JSONSerialization.data(withJSONObject: body)
 
         do {
-            #if os(Linux)
-            let (data, response) = try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<(Data, URLResponse), Swift.Error>) in
-                session.dataTask(with: urlRequest) { data, response, error in
-                    if let error = error {
-                        continuation.resume(throwing: error)
-                    } else if let data = data, let response = response {
-                        continuation.resume(returning: (data, response))
-                    } else {
-                        let unknownError = NSError(domain: NSURLErrorDomain, code: NSURLErrorBadServerResponse, userInfo: nil)
-                        continuation.resume(throwing: unknownError)
-                    }
-                }.resume()
-            }
-            #else
             let (data, response) = try await session.data(for: urlRequest)
-            #endif
             guard let http = response as? HTTPURLResponse else {
                 return recordFailure("No HTTP response from provider.", elapsed())
             }
