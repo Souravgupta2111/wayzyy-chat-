@@ -1,6 +1,11 @@
 // Tier 3 judge contract with an offline fixture and a remote model client carrying budgets, a circuit breaker and prompt sanitisation.
 
 import Foundation
+// URLSession lives in FoundationNetworking on Linux. Without this the file compiles on macOS
+// and fails in a container, which is the worst possible place to discover it.
+#if canImport(FoundationNetworking)
+import FoundationNetworking
+#endif
 
 struct JudgeRequest {
     let window: [String]
@@ -100,6 +105,8 @@ final class RemoteJudge: SemanticJudge {
         var timeout: TimeInterval = 30.0
         var maxCallsPerMinute: Int = 600
         var maxCallsPerDay: Int = 250_000
+        /// How many fallback models to try before giving up on this request.
+        var maxFallbackAttempts: Int = 3
 
         var breakerFailureThreshold: Int = 3
         var breakerCooldown: TimeInterval = 30
@@ -134,9 +141,19 @@ final class RemoteJudge: SemanticJudge {
                 model: model,
                 apiKey: apiKey
             )
-            if model.contains("gpt-oss") {
-                config.reasoningEffort = "low"
-            }
+            // `reasoning_effort` is deliberately not set.
+            //
+            // It began as a cost optimisation — this is a schema-constrained classification, not
+            // a task that benefits from deliberation, and reasoning tokens are billed. It is not
+            // worth what it costs to keep working. Measured in one session against one provider:
+            // some models reject "low" and demand "none" or "default", others reject "none" and
+            // demand "low" or "medium", and models reached through the rate-limit fallback path
+            // may not accept the parameter at all. Every one of those is a 400, and a 400 means
+            // no judgement, which degrades to a fail-closed hold — so the optimisation was
+            // paying for itself in unexplained held messages.
+            //
+            // An operator can still set it explicitly for a model they have verified.
+            _ = model
             return config
         }
     }
@@ -540,12 +557,56 @@ final class RemoteJudge: SemanticJudge {
                 let body = String(data: data, encoding: .utf8) ?? ""
                 let detail = Self.errorMessage(from: body) ?? body.prefix(160).description
 
-                if allowModelFallback, http.statusCode == 429, let next = fallbackModels.first {
-                    fallbackModels.removeFirst()
-                    configuration.model = next
+                // Provider APIs drift. A 400 naming `reasoning_effort` is retried once
+                // without it. No lock needed here — we pass the modified config as a
+                // local, not by mutating self.configuration.
+                if http.statusCode == 400,
+                   detail.contains("reasoning_effort"),
+                   configuration.reasoningEffort != nil {
+                    var retryConfig = configuration
+                    retryConfig.reasoningEffort = nil
                     releaseCall()
                     if isProbe { clearProbe() }
-                    return await judge(request)
+                    return await judgeWith(retryConfig, request: request)
+                }
+
+                // 429 — rate limited. Rotate to the next model and retry with exponential
+                // backoff + jitter so a burst of concurrent calls does not all wake and
+                // hammer the provider at the same moment.
+                //
+                // The race: two concurrent `judge` calls both hit 429, both read
+                // `fallbackModels.first`, both get the same next model, both mutate
+                // `self.configuration.model = next`, and both strip reasoningEffort.
+                // The second write wins, but the real harm is that both then retry on
+                // the same model — wasting the fallback slot and potentially triggering
+                // another 429. Fix: copy the chosen model locally under the lock, then
+                // pass it down as a local `Configuration` rather than mutating self.
+                if allowModelFallback, http.statusCode == 429 {
+                    let maybeNext: String? = stateLock.withLock {
+                        guard !fallbackModels.isEmpty else { return nil }
+                        return fallbackModels.removeFirst()
+                    }
+                    if let next = maybeNext {
+                        var retryConfig = configuration
+                        retryConfig.model = next
+                        if !next.contains("gpt-oss") { retryConfig.reasoningEffort = nil }
+
+                        // Exponential backoff with full jitter. Base 250 ms, max 8 s.
+                        // Full jitter (random in [0, cap]) distributes retries across
+                        // time instead of synchronising them — a thundering-herd of
+                        // concurrent 429s would otherwise all sleep for the same
+                        // duration and collide again.
+                        let attempt = max(0, (configuration.maxFallbackAttempts
+                                              - fallbackModels.count) - 1)
+                        let cap = min(8_000.0, 250.0 * pow(2.0, Double(attempt)))
+                        let jitterMs = Double.random(in: 0...cap)
+                        if jitterMs >= 1 {
+                            try? await Task.sleep(nanoseconds: UInt64(jitterMs * 1_000_000))
+                        }
+                        releaseCall()
+                        if isProbe { clearProbe() }
+                        return await judgeWith(retryConfig, request: request)
+                    }
                 }
                 return recordFailure("HTTP \(http.statusCode): \(detail)", elapsed())
             }
@@ -755,5 +816,34 @@ final class RemoteJudge: SemanticJudge {
             decision: .abstain, confidence: 0, rationale: reason,
             intent: nil, source: identifier, latencyMs: latency
         )
+    }
+
+    /// The fallback entry point. Accepts a locally-modified Configuration instead of
+    /// mutating `self.configuration`, which is what closes the race: two concurrent
+    /// 429s each pick a different model from `fallbackModels` under the lock and each
+    /// proceed with their own copy, so neither write is visible to the other.
+    private func judgeWith(_ config: Configuration,
+                            request: JudgeRequest) async -> JudgeVerdict {
+        // Run through the full judge() path but with the supplied configuration
+        // substituted. We do this by temporarily hoisting the call into a throw-away
+        // judge instance that shares no state with self (so its breaker and counters
+        // are independent). Its result is then attributed back to our identifier.
+        let delegate = RemoteJudge(configuration: config,
+                                   session: session,
+                                   allowModelFallback: false)
+        var v = await delegate.judge(request)
+        // Re-stamp the source so callers see our identifier, not the delegate's.
+        v = JudgeVerdict(decision: v.decision, confidence: v.confidence,
+                         rationale: v.rationale, intent: v.intent,
+                         safetyCategory: v.safetyCategory,
+                         source: identifier, latencyMs: v.latencyMs)
+        // Propagate success / failure back to our own circuit breaker so the model
+        // health state reflects what actually happened.
+        if v.decision == .abstain {
+            _ = recordFailure(v.rationale, v.latencyMs)
+        } else {
+            recordSuccess()
+        }
+        return v
     }
 }

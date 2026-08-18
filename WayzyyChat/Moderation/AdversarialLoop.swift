@@ -1,6 +1,11 @@
 // Generates and grades new attack variants against the engine.
 
 import Foundation
+// URLSession lives in FoundationNetworking on Linux. Without this the file compiles on macOS
+// and fails in a container, which is the worst possible place to discover it.
+#if canImport(FoundationNetworking)
+import FoundationNetworking
+#endif
 
 protocol EvasionGenerator {
     var identifier: String { get }

@@ -9,6 +9,11 @@ enum SafetyRules {
         let confidence: Double
         let phrase: String
         let range: Range<Int>
+
+        /// Typed decision attributes. Present when the deciding rule established them,
+        /// so a reviewer can see *why* the finding stands, not only that it does.
+        var lever: LeverClass? = nil
+        var target: TargetClass? = nil
     }
 
     private static let coercionRX = RX(
@@ -19,9 +24,13 @@ enum SafetyRules {
         "review-threat",
         #"(?:bad|negative|1|one)\s*(?:star)?\s*review\s*(?:unless|if\s+you|until\s+you)"#
     )
+    // The verb list is deliberately broad. Precision comes from the lever gate, not from
+    // this pattern: "or i will report you" matches here and is then discarded because
+    // reporting is a lawful remedy. Widening the conditional therefore costs no precision
+    // and buys recall on phrasings we have not seen.
     private static let refundExtortRX = RX(
         "refund-extort",
-        #"(?:refund|discount|free|money\s+back)[^.!?]{0,40}?or\s+i(?:'?ll|\s+will)\s+(?:report|review|rate|complain|leave)"#
+        #"(?:refund|discount|free|money\s+back|pay\s+me)[^.!?]{0,40}?or\s+i(?:'?ll|\s+will)\s+(?:report|review|rate|complain|leave|tell|call|post|share|expose|contact|inform|trash|damage|ruin|destroy|wreck|break)"#
     )
 
     static var platformBrandTokens: Set<String> = ["wayzyy"]
@@ -127,7 +136,10 @@ enum SafetyRules {
 
     static var slurTerms: Set<String> {
         get { Lex.slurTerms }
-        set { Lex.slurTerms = newValue }
+        set {
+            Lex.requireMutable("Slur term assignment")
+            Lex.slurTerms = newValue
+        }
     }
 
     private static func profanity(alpha: CharView, alphaCompact: CharView) -> Finding? {
@@ -137,6 +149,24 @@ enum SafetyRules {
 
         func rangeFor(_ index: Int) -> Range<Int>? {
             alpha.originalRange(tokens[index].start, tokens[index].end)
+        }
+
+        // Multi-word slurs ("neech jaat", "bihari kutta") cannot be caught by token
+        // comparison, so the phrase forms are checked against the joined text first.
+        let joined = words.joined(separator: " ")
+        for phrase in Lex.slurTerms where phrase.contains(" ") && joined.contains(phrase) {
+            let upper = max(1, (alpha.offsets.last ?? 0) + 1)
+            return Finding(category: .harassment, confidence: 0.97,
+                           phrase: "slur", range: 0..<upper, target: .group)
+        }
+
+        // Spelling variants, via the phonetic skeleton. Short skeletons are discarded when
+        // the set is built, so this cannot reintroduce the `tatti` → "t" class of collision.
+        let skeletonWords = Set(words.map { HinglishFold.skeleton($0) })
+        if SlurLexicon.matchesSkeleton(skeletonWords) {
+            let upper = max(1, (alpha.offsets.last ?? 0) + 1)
+            return Finding(category: .harassment, confidence: 0.97,
+                           phrase: "slur (skeleton match)", range: 0..<upper, target: .group)
         }
 
         for (i, w) in words.enumerated() where Lex.slurTerms.contains(w) {
@@ -282,10 +312,49 @@ enum SafetyRules {
         }
     }
 
+    // Skeleton sets, folded once at load. One entry covers every spelling of a word and
+    // both scripts, because Devanagari is transliterated before folding.
+    private static let indicProfanitySkeletons = HinglishFold.skeletonSet(Lex.profanityIndic)
+
+    /// Romanised-Hindi and Devanagari profanity, matched in skeleton space so spelling
+    /// variance costs nothing. The target rule still applies: profanity aimed at the
+    /// property is a crude review, not abuse.
+    ///
+    /// Targets are deliberately checked on the **surface** form, not in skeleton space.
+    /// Target terms are short — `tu` reduces to `"t"`, `tera` to `"tr"` — so folding them
+    /// would let ordinary words like `to` and `the` satisfy the person requirement and
+    /// quietly disable the rule that makes this whole layer safe.
+    private static func skeletonProfanity(_ skeleton: CharView, surface: String) -> Finding? {
+        guard !skeleton.isEmpty else { return nil }
+        let skeletonWords = Set(skeleton.text.split(separator: " ").map(String.init))
+        guard !skeletonWords.isEmpty,
+              !skeletonWords.isDisjoint(with: indicProfanitySkeletons) else { return nil }
+
+        let surfaceWords = surface
+            .split(whereSeparator: { !$0.isLetter && !$0.isNumber })
+            .map(String.init)
+        let person = surfaceWords.contains { Lex.personTargets.contains($0) }
+            || EscalationAnalyser.addressesPersonNativeScript(surface)
+        let property = surfaceWords.contains { Lex.propertyTargets.contains($0) }
+
+        guard person else { return nil }
+        if property && !person { return nil }
+
+        let upper = max(1, (skeleton.offsets.last ?? 0) + 1)
+        return Finding(
+            category: .harassment,
+            confidence: 0.94,
+            phrase: "profanity directed at a person (skeleton match)",
+            range: 0..<upper,
+            target: .person
+        )
+    }
+
     static func evaluate(
         base: CharView,
         alpha: CharView,
         alphaCompact: CharView,
+        skeleton: CharView? = nil,
         original: String = ""
     ) -> [Finding] {
         let text = base.text
@@ -295,7 +364,16 @@ enum SafetyRules {
         if let phish = brandImpersonation(base: base, original: original.isEmpty ? text : original) {
             findings.append(phish)
         }
-        if let abuse = profanity(alpha: alpha, alphaCompact: alphaCompact) { findings.append(abuse) }
+        if let bias = discrimination(base: base, original: original) {
+            findings.append(bias)
+        }
+        if let abuse = profanity(alpha: alpha, alphaCompact: alphaCompact) {
+            findings.append(abuse)
+        } else if let skeleton, let abuse = skeletonProfanity(skeleton, surface: text) {
+            // Only consulted when the surface-form pass found nothing, so the skeleton
+            // view adds recall on unseen spellings without changing existing verdicts.
+            findings.append(abuse)
+        }
 
         let messageWords = text
             .split(whereSeparator: { !$0.isLetter && !$0.isNumber })
@@ -327,14 +405,33 @@ enum SafetyRules {
             harassmentTargetHolds(phrase, words: messageWords)
         }
         scan(Lex.scamPhrases, .scam, 0.82)
-        scan(Lex.coercionPhrases, .coercion, 0.78)
 
-        for rx in [coercionRX, reviewThreatRX, refundExtortRX] {
-            guard findings.first(where: { $0.category == .coercion }) == nil else { break }
-            for m in rx.matches(in: text, limit: 1) {
-                guard let orig = base.originalRange(m.start, m.end) else { continue }
-                findings.append(Finding(category: .coercion, confidence: 0.88, phrase: m.text, range: orig))
+        // Coercion is a two-part test: a conditional demand AND illegitimate leverage.
+        // A conditional demand paired with a lawful remedy — an honest review, a platform
+        // report, a bank dispute, a police report of a real crime — is a customer
+        // exercising a right and produces no finding. The conditional still raises a
+        // router suspicion, so genuinely novel leverage reaches Tier 3 for adjudication.
+        let leverClass = LeverTaxonomy.classify(text)
+        if leverClass == .illegitimate {
+            scan(Lex.coercionPhrases, .coercion, 0.78)
+
+            for rx in [coercionRX, reviewThreatRX, refundExtortRX] {
+                guard findings.first(where: { $0.category == .coercion }) == nil else { break }
+                for m in rx.matches(in: text, limit: 1) {
+                    guard let orig = base.originalRange(m.start, m.end) else { continue }
+                    findings.append(Finding(category: .coercion, confidence: 0.88,
+                                            phrase: m.text, range: orig,
+                                            lever: .illegitimate))
+                }
             }
+        }
+
+        // Stamp the established lever on every coercion finding so the reason is auditable.
+        findings = findings.map { f in
+            guard f.category == .coercion, f.lever == nil else { return f }
+            var out = f
+            out.lever = leverClass
+            return out
         }
 
         return findings

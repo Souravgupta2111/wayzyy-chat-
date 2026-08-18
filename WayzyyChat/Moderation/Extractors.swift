@@ -271,24 +271,39 @@ enum Extractors {
                 .replacingOccurrences(of: "www.", with: "")
                 .split(separator: "/").first.map(String.init) ?? lowered
 
-            if ownDomains.contains(host) { return nil }
+            // Operator allowlist wins outright: this deployment's own hosts are not external.
+            if ownDomains.contains(host) || URLReputation.isAllowlisted(host: host) { return nil }
+
+            // Shape first. Reputation is consulted afterwards and may only raise the result,
+            // so a reputation feed can never talk the engine out of a shape-based finding.
+            var shapeConfidence: Double? = nil
+            var shapeReason: String? = nil
+
             if Lex.shorteners.contains(host) {
-                return (.externalURL, 0.94, "Known link-shortener or deep-link host")
+                shapeConfidence = 0.94
+                shapeReason = "Known link-shortener or deep-link host"
+            } else if host.contains("xn--") {
+                shapeConfidence = 0.92
+                shapeReason = "Punycode domain — deliberately obscured host"
+            } else {
+                let tld = host.split(separator: ".").last.map(String.init) ?? ""
+                if Lex.commonTLDs.contains(tld) {
+                    shapeConfidence = 0.68
+                    shapeReason = "External link"
+                } else if explicitScheme,
+                          host.contains("."),
+                          tld.count >= 2, tld.count <= 24,
+                          tld.allSatisfy({ $0.isLetter }) {
+                    shapeConfidence = 0.68
+                    shapeReason = "External link — scheme present, TLD outside allowlist"
+                }
             }
-            if host.contains("xn--") {
-                return (.externalURL, 0.92, "Punycode domain — deliberately obscured host")
-            }
-            let tld = host.split(separator: ".").last.map(String.init) ?? ""
-            if Lex.commonTLDs.contains(tld) {
-                return (.externalURL, 0.68, "External link")
-            }
-            if explicitScheme,
-               host.contains("."),
-               tld.count >= 2, tld.count <= 24,
-               tld.allSatisfy({ $0.isLetter }) {
-                return (.externalURL, 0.68, "External link — scheme present, TLD outside allowlist")
-            }
-            return nil
+
+            guard let (conf, why) = URLReputation.adjust(host: host,
+                                                         shapeConfidence: shapeConfidence,
+                                                         shapeReason: shapeReason)
+            else { return nil }
+            return (.externalURL, conf, why)
         }
 
         for m in urlRX.matches(in: base.text) {

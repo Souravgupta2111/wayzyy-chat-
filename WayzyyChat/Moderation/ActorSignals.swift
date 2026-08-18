@@ -30,24 +30,13 @@ final class ActorSignalStore {
     static let patternThreshold = 3
     static let patternThresholdAfterReport = 2
 
-    private struct Event {
-        let at: Date
-        let conversation: String
-        let safetyScore: Double
-        let routedForSafety: Bool
-        let acted: Bool
+    /// Storage only. Every threshold and all of the risk arithmetic stays in this type, so
+    /// swapping in a shared backend cannot change what the numbers mean.
+    private let backend: ActorSignalBackend
+
+    init(backend: ActorSignalBackend = InMemoryActorSignalBackend()) {
+        self.backend = backend
     }
-
-    private struct SenderState {
-        var events: [Event] = []
-        var reports: [Date] = []
-        var blocks: [Date] = []
-    }
-
-    private let lock = NSLock()
-    private var senders: [String: SenderState] = [:]
-
-    private let maxSenders = 20_000
 
     func observe(
         sender: String,
@@ -57,41 +46,45 @@ final class ActorSignalStore {
         acted: Bool,
         at now: Date = Date()
     ) {
-        lock.lock()
-        defer { lock.unlock() }
-        if senders[sender] == nil, senders.count >= maxSenders { evictOldestLocked() }
-        var state = senders[sender] ?? SenderState()
-        state.events.append(Event(at: now, conversation: conversation,
-                                  safetyScore: safetyScore,
-                                  routedForSafety: routedForSafety, acted: acted))
-        prune(&state, now: now)
-        senders[sender] = state
+        backend.mutate(sender: sender) { state in
+            state.events.append(ActorSignalSnapshot.Event(
+                at: now, conversation: conversation, safetyScore: safetyScore,
+                routedForSafety: routedForSafety, acted: acted))
+            state.prune(before: now.addingTimeInterval(-Self.window))
+        }
     }
 
     func recordReport(against sender: String, at now: Date = Date()) {
-        lock.lock()
-        defer { lock.unlock() }
-        var state = senders[sender] ?? SenderState()
-        state.reports.append(now)
-        prune(&state, now: now)
-        senders[sender] = state
+        backend.mutate(sender: sender) { state in
+            state.reports.append(now)
+            state.prune(before: now.addingTimeInterval(-Self.window))
+        }
     }
 
     func recordBlock(of sender: String, at now: Date = Date()) {
-        lock.lock()
-        defer { lock.unlock() }
-        var state = senders[sender] ?? SenderState()
-        state.blocks.append(now)
-        prune(&state, now: now)
-        senders[sender] = state
+        backend.mutate(sender: sender) { state in
+            state.blocks.append(now)
+            state.prune(before: now.addingTimeInterval(-Self.window))
+        }
+    }
+
+    /// Persist DB-backed violation counts so a replica that has not seen this sender still clamps.
+    func notePlatformPriors(sender: String, count: Int) {
+        guard count > 0 else { return }
+        backend.mutate(sender: sender) { state in
+            state.platformPriors = max(state.platformPriors, count)
+        }
+    }
+
+    func platformPriors(for sender: String) -> Int {
+        max(0, backend.snapshot(sender: sender)?.platformPriors ?? 0)
     }
 
     func risk(for sender: String, conversation: String, at now: Date = Date()) -> ActorRisk {
-        lock.lock()
-        defer { lock.unlock() }
-        guard var state = senders[sender] else { return ActorRisk() }
-        prune(&state, now: now)
-        senders[sender] = state
+        guard var state = backend.snapshot(sender: sender) else { return ActorRisk() }
+        // Prune on read as well as write: expired evidence must not count towards a threshold
+        // just because the sender has been quiet since.
+        state.prune(before: now.addingTimeInterval(-Self.window))
 
         var risk = ActorRisk()
         risk.messagesInWindow = state.events.count
@@ -112,35 +105,13 @@ final class ActorSignalStore {
         return risk
     }
 
-    private func prune(_ state: inout SenderState, now: Date) {
-        let cutoff = now.addingTimeInterval(-Self.window)
-        state.events.removeAll { $0.at < cutoff }
-        state.reports.removeAll { $0 < cutoff }
-        state.blocks.removeAll { $0 < cutoff }
-    }
+    /// For startup reporting only: which storage is actually installed. A deployment that
+    /// believes it moved actor state to a shared store and did not should be able to see that.
+    var backendForDiagnostics: ActorSignalBackend { backend }
 
-    private func evictOldestLocked() {
-        let oldest = senders.min { a, b in
-            (a.value.events.last?.at ?? .distantPast) < (b.value.events.last?.at ?? .distantPast)
-        }
-        if let key = oldest?.key { senders.removeValue(forKey: key) }
-    }
+    func reset(sender: String) { backend.remove(sender: sender) }
 
-    func reset(sender: String) {
-        lock.lock()
-        senders.removeValue(forKey: sender)
-        lock.unlock()
-    }
+    func resetAll() { backend.removeAll() }
 
-    func resetAll() {
-        lock.lock()
-        senders.removeAll()
-        lock.unlock()
-    }
-
-    var trackedSenderCount: Int {
-        lock.lock()
-        defer { lock.unlock() }
-        return senders.count
-    }
+    var trackedSenderCount: Int { backend.trackedSenderCount }
 }

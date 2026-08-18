@@ -15,6 +15,7 @@ enum Suspicion: String, Codable, CaseIterable, Identifiable {
     case conditionalDemand
     case classifierUncertain
     case escalatingPattern
+    case learnedAbuse
 
     var id: String { rawValue }
 
@@ -27,6 +28,7 @@ enum Suspicion: String, Codable, CaseIterable, Identifiable {
         case .wordlessProtocolCue: return "Wordless communication cue"
         case .anomalousRegularity: return "Anomalous structural regularity"
         case .personDirectedAnomaly: return "Person-directed and unlike ordinary chat"
+        case .learnedAbuse:        return "Resembles abuse the model has been trained on"
         case .conditionalDemand:   return "Demand with a condition attached"
         case .classifierUncertain: return "Classifier in the routing band"
         case .escalatingPattern:   return "Escalating pattern across messages"
@@ -48,7 +50,9 @@ enum Suspicion: String, Codable, CaseIterable, Identifiable {
         case .conditionalDemand:
             return "A request is made contingent on something, which is the shape of extortion rather than of a complaint."
         case .classifierUncertain:
-            return "The multilingual classifier scored a safety head above its routing bar but below its enforcement bar. Not enough to act on; more than enough to ask about."
+            return "The safety classifier scored a safety head above its routing bar but below its enforcement bar. Not enough to act on; more than enough to ask about. Note that the classifier behind this interface is, by default, a heuristic derived from Tier 1 and Tier 2 signals rather than a trained multilingual model — the interface accepts one, and calling it 'the multilingual classifier' overstated what ships."
+        case .learnedAbuse:
+            return "A character-level model trained on abuse corpora scored this above its routing bar. It exists because published word lists contain `chutiya` but not `chutiye`, so matching cannot keep up with how people actually spell; n-grams generalise across inflection and obfuscation without anyone authoring the variants. It carries no judgement about what the message says — only that a model should read it."
         case .escalatingPattern:
             return "Several messages from this sender to the same recipient each scored below every threshold, but together they form a pattern. Sustained low-grade harassment is invisible to per-message evaluation by construction."
         case .spacedDomain:

@@ -23,6 +23,13 @@ enum SecretsStore {
             absorb(parsed)
         }
 
+        // A mounted secret file. Orchestrators inject credentials as files far more often than
+        // as environment variables, and the `#filePath` fallback below resolves to a source
+        // directory that does not exist in a container image.
+        if let path = ProcessInfo.processInfo.environment["WAYZYY_SECRETS_FILE"], !path.isEmpty {
+            candidates.append(URL(fileURLWithPath: path))
+        }
+
         let root = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()
             .deletingLastPathComponent()

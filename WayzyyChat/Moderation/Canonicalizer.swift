@@ -88,12 +88,17 @@ struct Canonicalizer {
         var compactDigits: CharView
         var romanDigits: CharView
 
+        /// Devanagari transliterated to Latin, so one lexicon serves both scripts.
+        var devanagariLatin: CharView
+        /// Romanised-Hindi phonetic skeleton: spelling variance collapsed to a shared key.
+        var hinglishSkeleton: CharView
+
         var allTransforms: [String] {
             var seen = Set<String>()
             var ordered: [String] = []
             for v in [raw, base, alpha, compact, alphaCompact, digits, digitsMasked,
                       digitsReversed, separators, separatorsAlt, acrostic,
-                      compactDigits, romanDigits] {
+                      compactDigits, romanDigits, devanagariLatin, hinglishSkeleton] {
                 for t in v.transforms where !seen.contains(t) {
                     seen.insert(t)
                     ordered.append(t)
@@ -281,6 +286,17 @@ struct Canonicalizer {
             .expandNumberWords(Self.expandRomanNumerals(base))
             .filtering("digits-only") { $0.isNumber }
 
+        // Devanagari to Latin. One character can expand to several ("भ" -> "bh"), and
+        // mapping() replicates the source offset across the expansion, so ranges still
+        // map back to the original message.
+        let devanagariLatin = base.mapping("devanagari-latin") { ch in
+            HinglishFold.transliterate(String(ch))
+        }
+
+        // Phonetic skeleton over the transliterated view, so romanised Hindi and
+        // Devanagari collapse to the same key. Built per word to keep boundaries.
+        let hinglishSkeleton = Self.buildHinglishSkeleton(devanagariLatin)
+
         return Views(
             raw: visible,
             base: base,
@@ -294,7 +310,53 @@ struct Canonicalizer {
             separatorsAlt: separatorsAlt,
             acrostic: acrostic,
             compactDigits: compactDigits,
-            romanDigits: romanDigits
+            romanDigits: romanDigits,
+            devanagariLatin: devanagariLatin,
+            hinglishSkeleton: hinglishSkeleton
+        )
+    }
+
+    /// Fold each word to its phonetic skeleton while preserving word boundaries and
+    /// original character offsets, so a match can still be reported against the source.
+    static func buildHinglishSkeleton(_ view: CharView) -> CharView {
+        var outChars: [Character] = []
+        var outOffsets: [Int] = []
+        var changed = false
+
+        var wordChars: [Character] = []
+        var wordOffsets: [Int] = []
+
+        func flushWord() {
+            guard !wordChars.isEmpty else { return }
+            let folded = HinglishFold.skeleton(String(wordChars))
+            if folded.count != wordChars.count { changed = true }
+            // Attribute the whole folded word to its first source offset. Skeletons are
+            // lossy by construction, so per-character attribution is not meaningful.
+            let origin = wordOffsets.first ?? 0
+            for c in folded {
+                outChars.append(c)
+                outOffsets.append(origin)
+            }
+            wordChars.removeAll(keepingCapacity: true)
+            wordOffsets.removeAll(keepingCapacity: true)
+        }
+
+        for (i, ch) in view.chars.enumerated() {
+            if ch.isLetter || ch.isNumber {
+                wordChars.append(ch)
+                wordOffsets.append(view.offsets[i])
+            } else {
+                flushWord()
+                outChars.append(" ")
+                outOffsets.append(view.offsets[i])
+            }
+        }
+        flushWord()
+
+        return CharView(
+            chars: outChars,
+            offsets: outOffsets,
+            transforms: changed ? view.transforms + ["hinglish-skeleton"] : view.transforms
         )
     }
 

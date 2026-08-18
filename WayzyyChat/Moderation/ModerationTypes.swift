@@ -53,6 +53,10 @@ enum ModCategory: String, Codable, CaseIterable {
     case scam
     case sexual
     case selfHarm
+    /// Refusing or conditioning accommodation on a protected characteristic. Distinct from
+    /// harassment: the harm is exclusion, not insult, and in India casteist abuse is a
+    /// criminal offence under the SC/ST (Prevention of Atrocities) Act.
+    case discrimination
     case systemManipulation
 
     var display: String {
@@ -71,6 +75,7 @@ enum ModCategory: String, Codable, CaseIterable {
         case .scam:           return "Scam / off-platform"
         case .sexual:         return "Sexual content"
         case .selfHarm:       return "Self-harm"
+        case .discrimination: return "Discrimination"
         case .systemManipulation: return "Moderation tampering"
         }
     }
@@ -101,6 +106,7 @@ enum ModCategory: String, Codable, CaseIterable {
         case .scam:           return "eye.trianglebadge.exclamationmark.fill"
         case .sexual:         return "eye.slash.fill"
         case .selfHarm:       return "heart.text.square.fill"
+        case .discrimination: return "person.2.slash.fill"
         case .systemManipulation: return "hammer.circle.fill"
         }
     }
@@ -185,6 +191,16 @@ enum TrustTier: String, Codable, CaseIterable, Identifiable {
         case .trusted:  return +0.10
         }
     }
+
+    /// Wire values plus aliases a mobile client is likely to send.
+    static func parse(_ raw: String?) -> TrustTier {
+        switch (raw ?? "").trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+        case "fresh", "new":                 return .fresh
+        case "trusted", "established":       return .trusted
+        case "standard", "verified", "":     return .standard
+        default:                             return .standard
+        }
+    }
 }
 
 enum BookingStage: String, Codable, CaseIterable, Identifiable {
@@ -207,6 +223,20 @@ enum BookingStage: String, Codable, CaseIterable, Identifiable {
         case .inquiry:   return 0.0
         case .booked:    return +0.14
         case .checkedIn: return +0.22
+        }
+    }
+
+    /// Wire values plus aliases a mobile client is likely to send.
+    static func parse(_ raw: String?) -> BookingStage {
+        switch (raw ?? "").trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+        case "booked":
+            return .booked
+        case "checkedin", "checked_in", "checked-in", "staying", "completed":
+            return .checkedIn
+        case "inquiry", "":
+            return .inquiry
+        default:
+            return .inquiry
         }
     }
 }

@@ -1,6 +1,11 @@
 // Layer 3 contract: multi-label safety heads, calibration bands, the signal-derived default and a remote backend.
 
 import Foundation
+// URLSession lives in FoundationNetworking on Linux. Without this the file compiles on macOS
+// and fails in a container, which is the worst possible place to discover it.
+#if canImport(FoundationNetworking)
+import FoundationNetworking
+#endif
 
 enum SafetyHead: String, CaseIterable, Codable {
     case threat
@@ -174,11 +179,36 @@ final class RemoteSafetyClassifier: SafetyClassifier {
         var endpoint: URL
         var timeout: TimeInterval = 0.25
         var apiKey: String? = nil
+        var wireFormat: WireFormat = .wayzyy
+        /// Only used by formats that name a model in the request body.
+        var model: String? = nil
         var calibration: SafetyCalibration = {
             var c = SafetyCalibration.default
             c.enforcementEnabled = true
             return c
         }()
+
+        /// OpenAI's moderation endpoint as a routing signal.
+        ///
+        /// Deliberately routing-only: `enforcementEnabled` stays false regardless of how
+        /// confident the provider is. A third party's opinion is evidence for asking a question,
+        /// never authority to withhold someone's message — the same rule the local heuristic and
+        /// the learned router live under.
+        ///
+        /// The timeout is generous compared to the local default because nothing waits on it: a
+        /// cache miss returns local scores immediately and this refreshes in the background.
+        static func openAIModeration(apiKey: String,
+                                     model: String = "omni-moderation-latest") -> Configuration {
+            var config = Configuration(
+                endpoint: URL(string: "https://api.openai.com/v1/moderations")!,
+                timeout: 10,
+                apiKey: apiKey
+            )
+            config.wireFormat = .openAIModeration
+            config.model = model
+            config.calibration.enforcementEnabled = false
+            return config
+        }
 
         static func local(port: Int = 8_080, path: String = "/classify") -> Configuration {
             Configuration(endpoint: URL(string: "http://127.0.0.1:\(port)\(path)")!)
@@ -188,6 +218,10 @@ final class RemoteSafetyClassifier: SafetyClassifier {
     let identifier: String
     var calibration: SafetyCalibration { configuration.calibration }
 
+    /// Whether the classifier used on a cache miss or during an outage is permitted to
+    /// enforce. Must be false: degradation may reduce authority, never increase it.
+    var fallbackCanEnforce: Bool { fallback.calibration.enforcementEnabled }
+
     private let configuration: Configuration
     private let session: URLSession
     private let fallback: SignalDerivedSafetyClassifier
@@ -195,21 +229,103 @@ final class RemoteSafetyClassifier: SafetyClassifier {
     private var consecutiveFailures = 0
     private var disabledUntil: Date? = nil
     private(set) var lastFailure: String? = nil
+    private var cache: [String: CacheEntry] = [:]
+    private var inFlight: Set<String> = []
+
+    /// Calibration used when the remote endpoint is unavailable. Exposed so the
+    /// degradation invariant can be asserted by a test rather than assumed.
+    var fallbackCalibration: SafetyCalibration { fallback.calibration }
 
     init(configuration: Configuration, session: URLSession = .shared) {
         self.configuration = configuration
         self.session = session
         self.identifier = "remote-classifier-\(configuration.endpoint.host ?? "local")"
-        self.fallback = SignalDerivedSafetyClassifier(calibration: configuration.calibration)
+
+        // Degradation must reduce authority, never increase it. The fallback produces
+        // uncalibrated heuristic scores, so it is explicitly stripped of enforcement
+        // authority — it may route, it may never enforce. Previously this inherited
+        // `configuration.calibration`, which is enforcement-enabled, meaning a remote
+        // outage would have *granted* the local heuristic the power to act.
+        var routingOnly = configuration.calibration
+        routingOnly.enforcementEnabled = false
+        self.fallback = SignalDerivedSafetyClassifier(calibration: routingOnly)
     }
 
+    /// Classify without ever waiting on the network.
+    ///
+    /// Layer 3 sits on the synchronous write path, where the entire tier model depends on it
+    /// being effectively free. Blocking a worker for up to `timeout` per message contradicts
+    /// that: on a shared service it converts a fast deterministic path into a queue, and one
+    /// slow endpoint becomes a platform-wide latency incident.
+    ///
+    /// So the remote score is treated as a *cache*, not a dependency:
+    ///
+    ///   * a cached score for this exact canonical text is returned immediately;
+    ///   * otherwise the local signal-derived score is returned immediately, and a refresh is
+    ///     dispatched in the background for next time.
+    ///
+    /// This is sound because Layer 3 only routes. A first-sighting message is routed on local
+    /// signals, and anything genuinely ambiguous reaches Tier 3, which is where a model is
+    /// permitted to be slow because it runs off the write path.
     func classify(_ input: SafetyClassifierInput) -> SafetyScores {
-        stateLock.lock()
-        let skip = disabledUntil.map { Date() < $0 } ?? false
-        stateLock.unlock()
-        if skip { return degrade(input, reason: "endpoint cooling down") }
+        if let cached = cachedScores(for: input.text) {
+            return SafetyScores(source: identifier + "-cached", latencyMs: 0, scores: cached)
+        }
 
-        let started = DispatchTime.now().uptimeNanoseconds
+        stateLock.lock()
+        let coolingDown = disabledUntil.map { Date() < $0 } ?? false
+        stateLock.unlock()
+        if !coolingDown { refreshInBackground(input.text) }
+
+        // Local scores, immediately. Calibrated routing-only, so a cache miss can never
+        // enforce on the strength of a heuristic.
+        return fallback.classify(input)
+    }
+
+    // MARK: - Cache
+
+    private struct CacheEntry {
+        let scores: [SafetyHead: Double]
+        let at: Date
+    }
+
+    private static let cacheTTL: TimeInterval = 15 * 60
+    private static let cacheLimit = 5_000
+
+    private func cachedScores(for text: String) -> [SafetyHead: Double]? {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        guard let entry = cache[text] else { return nil }
+        guard Date().timeIntervalSince(entry.at) < Self.cacheTTL else {
+            cache.removeValue(forKey: text)
+            return nil
+        }
+        return entry.scores
+    }
+
+    private func store(_ scores: [SafetyHead: Double], for text: String) {
+        stateLock.lock()
+        if cache.count >= Self.cacheLimit {
+            // Cheap bound: drop the oldest quarter rather than maintaining an LRU, since a
+            // miss costs only a local classification.
+            let oldest = cache.sorted { $0.value.at < $1.value.at }
+                .prefix(Self.cacheLimit / 4)
+                .map(\.key)
+            for key in oldest { cache.removeValue(forKey: key) }
+        }
+        cache[text] = CacheEntry(scores: scores, at: Date())
+        consecutiveFailures = 0
+        disabledUntil = nil
+        stateLock.unlock()
+    }
+
+    private func refreshInBackground(_ text: String) {
+        stateLock.lock()
+        let alreadyFetching = inFlight.contains(text)
+        if !alreadyFetching { inFlight.insert(text) }
+        stateLock.unlock()
+        guard !alreadyFetching else { return }
+
         var request = URLRequest(url: configuration.endpoint)
         request.httpMethod = "POST"
         request.timeoutInterval = configuration.timeout
@@ -217,46 +333,128 @@ final class RemoteSafetyClassifier: SafetyClassifier {
         if let key = configuration.apiKey {
             request.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
         }
-        request.httpBody = try? JSONSerialization.data(withJSONObject: ["text": input.text])
+        request.httpBody = try? JSONSerialization.data(
+            withJSONObject: configuration.wireFormat.requestBody(text: text,
+                                                                model: configuration.model))
 
-        var payload: Data? = nil
-        let done = DispatchSemaphore(value: 0)
-        session.dataTask(with: request) { data, response, _ in
-            if let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) {
-                payload = data
+        session.dataTask(with: request) { [weak self] data, response, _ in
+            guard let self else { return }
+            self.stateLock.lock()
+            self.inFlight.remove(text)
+            self.stateLock.unlock()
+
+            guard let http = response as? HTTPURLResponse,
+                  (200..<300).contains(http.statusCode),
+                  let data, let parsed = self.configuration.wireFormat.parse(data)
+            else {
+                self.noteFailure(reason: "no usable response from classifier endpoint")
+                return
             }
-            done.signal()
+            self.store(parsed, for: text)
         }.resume()
-        _ = done.wait(timeout: .now() + configuration.timeout + 0.05)
-
-        guard let payload, let parsed = Self.parse(payload) else {
-            return recordFailure(input, reason: "no usable response from classifier endpoint")
-        }
-
-        stateLock.lock()
-        consecutiveFailures = 0
-        disabledUntil = nil
-        stateLock.unlock()
-
-        let elapsed = Double(DispatchTime.now().uptimeNanoseconds - started) / 1_000_000
-        return SafetyScores(source: identifier, latencyMs: elapsed, scores: parsed)
     }
 
-    private static func parse(_ data: Data) -> [SafetyHead: Double]? {
-        guard let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
-        else { return nil }
-        let body = (root["scores"] as? [String: Any]) ?? root
-        var out: [SafetyHead: Double] = [:]
-        for head in SafetyHead.allCases {
-            let snake = head.rawValue
-                .replacingOccurrences(of: "([a-z])([A-Z])", with: "$1_$2",
-                                      options: .regularExpression)
-                .lowercased()
-            let raw = body[head.rawValue] ?? body[snake]
-            if let d = raw as? Double { out[head] = d }
-            else if let n = raw as? NSNumber { out[head] = n.doubleValue }
+    static func parse(_ data: Data) -> [SafetyHead: Double]? {
+        WireFormat.wayzyy.parse(data)
+    }
+
+    /// How to talk to a scoring endpoint.
+    ///
+    /// This exists so a second provider is a *format*, not a second classifier. Everything that
+    /// makes this class safe on the write path — the cache, the background refresh, the circuit
+    /// breaker, the routing-only fallback — was difficult to get right and is covered by
+    /// invariants. A parallel implementation would inherit none of it and would need all of
+    /// those properties re-established and re-asserted.
+    enum WireFormat {
+        /// Our own shape: `{"text": ...}` in, a flat map of head names to scores out.
+        case wayzyy
+        /// OpenAI's moderation endpoint. Free at time of writing and multilingual, which makes
+        /// it worth having — but it is a free endpoint with no SLA from a vendor that deprecates
+        /// things, so it belongs here as an interchangeable secondary rather than as the thing
+        /// the system depends on. The most widely used free toxicity API in the industry
+        /// announced its shutdown while this was being built; that is the risk being managed.
+        case openAIModeration
+
+        func requestBody(text: String, model: String?) -> [String: Any] {
+            switch self {
+            case .wayzyy:
+                return ["text": text]
+            case .openAIModeration:
+                return ["model": model ?? "omni-moderation-latest", "input": text]
+            }
         }
-        return out.isEmpty ? nil : out
+
+        func parse(_ data: Data) -> [SafetyHead: Double]? {
+            switch self {
+            case .wayzyy:
+                guard let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+                else { return nil }
+                let body = (root["scores"] as? [String: Any]) ?? root
+                var out: [SafetyHead: Double] = [:]
+                for head in SafetyHead.allCases {
+                    let snake = head.rawValue
+                        .replacingOccurrences(of: "([a-z])([A-Z])", with: "$1_$2",
+                                              options: .regularExpression)
+                        .lowercased()
+                    let raw = body[head.rawValue] ?? body[snake]
+                    if let d = raw as? Double { out[head] = d }
+                    else if let n = raw as? NSNumber { out[head] = n.doubleValue }
+                }
+                return out.isEmpty ? nil : out
+
+            case .openAIModeration:
+                guard let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                      let results = root["results"] as? [[String: Any]],
+                      let first = results.first,
+                      let raw = first["category_scores"] as? [String: Any]
+                else { return nil }
+
+                func value(_ key: String) -> Double {
+                    if let d = raw[key] as? Double { return d }
+                    if let n = raw[key] as? NSNumber { return n.doubleValue }
+                    return 0
+                }
+                // Several provider categories map onto one head, so take the strongest rather
+                // than the last one read. `harassment` and `hate` are kept separate upstream but
+                // both land on harassment here; the distinction between insulting a person and
+                // insulting their group is drawn by our own discrimination rule, which needs the
+                // exclusion construction rather than a score.
+                var out: [SafetyHead: Double] = [:]
+                func raise(_ head: SafetyHead, _ v: Double) {
+                    out[head] = Swift.max(out[head] ?? 0, v)
+                }
+                raise(.harassment, value("harassment"))
+                raise(.harassment, value("harassment/threatening"))
+                raise(.harassment, value("hate"))
+                raise(.harassment, value("hate/threatening"))
+                raise(.threat, value("harassment/threatening"))
+                raise(.threat, value("hate/threatening"))
+                raise(.threat, value("violence"))
+                raise(.threat, value("violence/graphic"))
+                raise(.sexual, value("sexual"))
+                raise(.sexual, value("sexual/minors"))
+                raise(.selfHarm, value("self-harm"))
+                raise(.selfHarm, value("self-harm/intent"))
+                raise(.selfHarm, value("self-harm/instructions"))
+                // No provider category corresponds to coercion, scam, or a legitimate
+                // complaint. Leaving them unset matters: writing a zero would look like
+                // positive evidence of innocence and could suppress the complaint veto, which
+                // is what protects a guest's right to complain bluntly.
+                return out.values.contains(where: { $0 > 0 }) ? out : nil
+            }
+        }
+    }
+
+    /// Circuit breaker. Three consecutive failures stop background refreshes for 30 seconds,
+    /// so a dead endpoint costs one dispatched request per message rather than a storm.
+    private func noteFailure(reason: String) {
+        stateLock.lock()
+        consecutiveFailures += 1
+        lastFailure = reason
+        if consecutiveFailures >= 3 {
+            disabledUntil = Date().addingTimeInterval(30)
+        }
+        stateLock.unlock()
     }
 
     private func recordFailure(_ input: SafetyClassifierInput, reason: String) -> SafetyScores {

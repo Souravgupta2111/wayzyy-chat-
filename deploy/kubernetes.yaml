@@ -1,0 +1,182 @@
+# Reference deployment for the Wayzyy moderation service.
+#
+# The choices here that are not boilerplate:
+#
+# * `readinessProbe` hits /ready, which returns 503 when no Tier 3 adjudicator is reachable.
+#   That keeps a misconfigured pod out of the load balancer instead of letting it hold messages
+#   for an adjudicator that does not exist. `livenessProbe` hits /health and only restarts a
+#   genuinely wedged process — restarting would not fix missing configuration, and a restart loop
+#   during a provider outage removes capacity exactly when it is needed.
+#
+# * `WAYZYY_REQUIRE_TIER3` is set, so a pod with broken credentials fails to start rather than
+#   serving while silently converting critical-category traffic into permanent holds.
+#
+# * Replicas are set to 1 with a comment rather than 3, because the default in-memory backends
+#   are per-pod. Scaling out is a two-line change *after* a shared backend is installed — see
+#   the note below. Quietly running three pods with per-pod state would multiply every
+#   escalation threshold by three and lose cross-message detection.
+#
+# * The decision log is a PersistentVolumeClaim rather than emptyDir. On emptyDir a pod restart
+#   erases the enforcement history the service is required to be able to produce on appeal.
+
+apiVersion: v1
+kind: Secret
+metadata:
+  name: wayzyy-moderation-secrets
+type: Opaque
+stringData:
+  # Callers authenticate with a bearer token. Comma-separate to support rotation: add the new
+  # token, roll clients over, then remove the old one.
+  api-token: "replace-me"
+  # Provider credentials for Tier 3, in the shape SecretsStore expects.
+  keys.json: |
+    {"groq": "replace-me"}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: wayzyy-decisions
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      storage: 20Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: wayzyy-moderation
+  labels: { app: wayzyy-moderation }
+spec:
+  # Scale above 1 only when REDIS_URL is set and PING succeeds at boot (the process
+  # now refuses to start on a broken Redis URL instead of silently using per-pod memory).
+  replicas: 1
+  strategy:
+    type: RollingUpdate
+    rollingUpdate: { maxUnavailable: 0, maxSurge: 1 }
+  selector:
+    matchLabels: { app: wayzyy-moderation }
+  template:
+    metadata:
+      labels: { app: wayzyy-moderation }
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8080"
+        prometheus.io/path: "/metrics"
+        # /metrics requires the API bearer token (WAYZYY_API_TOKEN). Wire it on the
+        # ServiceMonitor; scraping without a credential now returns 401.
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: moderation
+          image: ghcr.io/wayzyy/moderation:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - { name: http, containerPort: 8080 }
+          env:
+            - name: WAYZYY_PORT
+              value: "8080"
+            - name: WAYZYY_API_TOKEN
+              valueFrom:
+                secretKeyRef: { name: wayzyy-moderation-secrets, key: api-token }
+            - name: WAYZYY_SECRETS_FILE
+              value: /etc/wayzyy/keys.json
+            - name: WAYZYY_DECISION_LOG
+              value: /var/lib/wayzyy/decisions.jsonl
+            # Refuse to start without an adjudicator: holds would otherwise be permanent.
+            - name: WAYZYY_REQUIRE_TIER3
+              value: "1"
+            - name: WAYZYY_RATE_BURST
+              value: "200"
+            - name: WAYZYY_RATE_PER_SECOND
+              value: "100"
+            - name: WAYZYY_MAX_CONCURRENT
+              value: "64"
+          volumeMounts:
+            - { name: secrets, mountPath: /etc/wayzyy, readOnly: true }
+            - { name: decisions, mountPath: /var/lib/wayzyy }
+          # Is the process configured well enough to be sent traffic?
+          readinessProbe:
+            httpGet: { path: /ready, port: http }
+            initialDelaySeconds: 2
+            periodSeconds: 5
+            failureThreshold: 2
+          # Is the process wedged? Only a restart fixes that.
+          livenessProbe:
+            httpGet: { path: /health, port: http }
+            initialDelaySeconds: 5
+            periodSeconds: 15
+            failureThreshold: 3
+          # Give the engine a moment to finish in-flight evaluations on shutdown, so a rolling
+          # update does not abandon decisions between evaluation and commit.
+          lifecycle:
+            preStop:
+              exec: { command: ["sleep", "5"] }
+          resources:
+            requests: { cpu: "250m", memory: "256Mi" }
+            limits:   { cpu: "2",    memory: "1Gi" }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: ["ALL"] }
+      terminationGracePeriodSeconds: 30
+      volumes:
+        - name: secrets
+          secret:
+            secretName: wayzyy-moderation-secrets
+            items:
+              - { key: keys.json, path: keys.json }
+        - name: decisions
+          persistentVolumeClaim: { claimName: wayzyy-decisions }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: wayzyy-moderation
+spec:
+  selector: { app: wayzyy-moderation }
+  ports:
+    - { name: http, port: 80, targetPort: http }
+---
+# Alerts on the two conditions that make this service quietly wrong rather than visibly broken.
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: wayzyy-moderation
+spec:
+  groups:
+    - name: wayzyy-moderation
+      rules:
+        - alert: WayzyyAdjudicatorUnavailable
+          expr: wayzyy_tier3_available == 0
+          for: 5m
+          labels: { severity: critical }
+          annotations:
+            summary: No Tier 3 adjudicator reachable
+            description: >
+              Critical-category messages are being blocked (fail-closed) and there is no
+              adjudicator to judge the uncertain remainder.
+        - alert: WayzyyDecisionsUnrecorded
+          expr: increase(wayzyy_decision_store_failures_total[5m]) > 0
+          labels: { severity: critical }
+          annotations:
+            summary: Decisions could not be recorded
+            description: >
+              An enforcement decision was not persisted, so it cannot be appealed or
+              reconciled. Any non-zero value needs investigation.
+        - alert: WayzyyEnforcementDrift
+          expr: >
+            sum(rate(wayzyy_action_total{action=~"mask|warn|block|review"}[30m]))
+            / clamp_min(sum(rate(wayzyy_action_total[30m])), 0.001) > 0.5
+          for: 30m
+          labels: { severity: warning }
+          annotations:
+            summary: More than half of traffic is being actioned
+            description: >
+              Either an attack is under way or a change altered the thresholds. Compare against
+              the published regression figures before assuming the former.

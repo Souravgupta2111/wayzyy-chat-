@@ -1,0 +1,33 @@
+# Keep the build context to what the service needs. Everything excluded here either does not
+# belong in an image or must never be in one.
+
+# Credentials. The service reads them from the environment or a mounted file at runtime; baking
+# them into a layer would publish them to anyone who can pull the image.
+Secrets.json
+*.xcconfig
+.env
+
+# Build products and local scratch — stale artefacts would shadow a clean build.
+.build/
+.verify/
+build/
+DerivedData/
+*.o
+
+# The SwiftUI app. Not part of the service.
+WayzyyChat/Views/
+WayzyyChat/Models/
+WayzyyChat/Assets.xcassets/
+WayzyyChat/Theme/
+WayzyyChat/*.swift
+
+# Documents, media and tooling. None of it is needed to run, and the media is large enough to
+# slow every build that includes it.
+*.md
+*.pptx
+*.mov
+tools/
+.github/
+.git/
+.gitignore
+.DS_Store

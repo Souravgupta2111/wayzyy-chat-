@@ -166,7 +166,14 @@ final class ChatStore: ObservableObject {
 
     private let engine = ModerationEngine.shared
 
-    @Published var tier3Enabled = false
+    /// Tier 3 follows adjudicator availability rather than a hardcoded default.
+    ///
+    /// Enabling it without a reachable model would promise adjudication that cannot happen;
+    /// leaving it off when one *is* reachable discards the layer that resolves implication
+    /// and, measurably, removes false positives on complaints. Either way the engine now
+    /// fails closed on critical-severity content when no adjudicator exists, so this flag
+    /// controls whether escalation runs — not whether safety holds.
+    @Published var tier3Enabled = ModerationEngine.shared.tier3Available
     @Published var tier3Activity: String? = nil
 
     init() {
@@ -409,6 +416,43 @@ final class ChatStore: ObservableObject {
         persist()
     }
 
+    // MARK: - Recipient controls
+    //
+    // Reports and blocks are the only label source in a design without a human review tier,
+    // and a report also lowers the behavioural pattern bar from three sub-threshold hits to
+    // two. They feed evidence forward; they never enforce on their own.
+
+    /// The recipient reported this conversation's sender.
+    func reportSender(in conversationID: UUID) {
+        guard let idx = conversations.firstIndex(where: { $0.id == conversationID }) else { return }
+        let actor = conversations[idx].actorContext(senderID: "me")
+        engine.report(sender: actor.senderID)
+        conversations[idx].messages.append(
+            ChatMessage(text: "Reported. Thanks — this helps us spot patterns.",
+                        isOutgoing: false, timestamp: Date(), isSystemNotice: true)
+        )
+        persist()
+    }
+
+    /// The recipient blocked this conversation's sender.
+    func blockSender(in conversationID: UUID) {
+        guard let idx = conversations.firstIndex(where: { $0.id == conversationID }) else { return }
+        let actor = conversations[idx].actorContext(senderID: "me")
+        engine.block(sender: actor.senderID)
+        conversations[idx].messages.append(
+            ChatMessage(text: "Blocked. You will not receive further messages here.",
+                        isOutgoing: false, timestamp: Date(), isSystemNotice: true)
+        )
+        persist()
+    }
+
+    /// Behavioural risk for a conversation's sender, for the ops view.
+    func behaviouralRisk(in conversationID: UUID) -> ActorRisk? {
+        guard let convo = conversations.first(where: { $0.id == conversationID }) else { return nil }
+        let actor = convo.actorContext(senderID: "me")
+        return engine.behaviouralRisk(sender: actor.senderID, conversation: actor.conversationID)
+    }
+
     func resolve(_ item: QueueItem, as resolution: QueueItem.Resolution) {
         guard let idx = queue.firstIndex(where: { $0.id == item.id }) else { return }
         queue[idx].resolution = resolution
@@ -461,13 +505,13 @@ final class ChatStore: ObservableObject {
         case .allow, .hint:
             return nil
         case .mask:
-            return "Wayzyy removed contact details from your message. Bookings made off-platform aren't covered by Wayzyy Protection."
+            return "Part of this message was removed."
         case .warn:
-            return "Your message wasn't sent. It looks like it contains contact details. Edit it and try again — off-platform bookings lose payment protection and damage cover."
+            return "Your message wasn't sent."
         case .block:
-            return "Your message wasn't sent and has been logged. Repeated attempts to share contact details may restrict your account."
+            return "Your message wasn't sent."
         case .review:
-            return "Your message is being reviewed by our team and will be delivered shortly if it meets our community standards."
+            return "Your message wasn't sent."
         }
     }
 

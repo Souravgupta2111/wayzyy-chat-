@@ -1,0 +1,364 @@
+name: Moderation
+
+# The invariant gate. Every guarantee published in WAYZYY_SAFETY_GUARDRAILS.md §14 is
+# asserted here, so a change cannot quietly violate one. The lawful-lever false positive
+# survived for as long as it did because two mislabelled corpus cases asserted it was
+# correct behaviour and nothing else checked.
+#
+# Deliberately dependency-free: `Package.swift` has no external dependencies, so this job
+# needs no package resolution, no network and no full Xcode toolchain.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "WayzyyChat/Moderation/**"
+      - "Sources/**"
+      - "tools/**"
+      - "Package.swift"
+      - "Dockerfile"
+      - ".dockerignore"
+      - ".github/workflows/moderation.yml"
+  pull_request:
+    paths:
+      - "WayzyyChat/Moderation/**"
+      - "Sources/**"
+      - "tools/**"
+      - "Package.swift"
+      - "Dockerfile"
+      - ".dockerignore"
+  workflow_dispatch:
+
+concurrency:
+  group: moderation-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # The service ships in a Linux container, so "it builds" has to mean "it builds on Linux".
+  # URLSession is in FoundationNetworking there and in Foundation on macOS, so a macOS-only
+  # job would pass while the image failed to build — the worst place to find out.
+  linux:
+    name: Linux build and invariant gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    container: swift:5.9-jammy
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Swift version
+        run: swift --version
+
+      - name: Build
+        run: swift build
+
+      - name: Invariant gate
+        run: ./.build/debug/wayzyy-invariants
+
+      - name: Service smoke test
+        run: |
+          set -euo pipefail
+          OUT=$(printf '{"op":"health"}\n{"id":"contact","text":"call me on 9876543210","senderID":"s","conversationID":"c"}\n' \
+            | ./.build/debug/wayzyy-moderate)
+          echo "$OUT"
+          echo "$OUT" | grep -q '"reasonCodes":\["HEALTHY"\]'
+          echo "$OUT" | grep -q '"action":"mask"'
+
+  invariants:
+    name: Build and invariant gate
+    runs-on: macos-14
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Swift version
+        run: swift --version
+
+      - name: Build
+        run: swift build
+
+      # Exits non-zero on any violated invariant.
+      - name: Invariant gate
+        run: ./.build/debug/wayzyy-invariants
+
+      # Proves the service contract responds and the engine is reachable through the
+      # public facade only.
+      - name: Service smoke test
+        run: |
+          set -euo pipefail
+          OUT=$(printf '%s\n' \
+            '{"op":"health"}' \
+            '{"id":"contact","text":"call me on 9876543210","senderID":"s","conversationID":"c"}' \
+            '{"id":"selfharm","text":"i want to kill myself","senderID":"s","conversationID":"c"}' \
+            | ./.build/debug/wayzyy-moderate)
+          echo "$OUT"
+          echo "$OUT" | grep -q '"reasonCodes":\["HEALTHY"\]'
+          echo "$OUT" | grep -q '"action":"mask"'
+          # Self-harm must always deliver.
+          echo "$OUT" | grep -q '"id":"selfharm","latencyMs".*"action":"allow"' \
+            || echo "$OUT" | grep '"id":"selfharm"' | grep -q '"action":"allow"'
+
+  corpus:
+    name: Regression corpus
+    runs-on: macos-14
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      # The regression suite is the precision gate: recall and precision must both hold at
+      # 100% and the false-positive rate must be exactly zero on the innocent set.
+      - name: Build corpus harness
+        run: swiftc -O WayzyyChat/Moderation/*.swift tools/metrics/main.swift -o /tmp/metrics
+
+      - name: Run corpus
+        run: |
+          set -euo pipefail
+          /tmp/metrics | tee /tmp/metrics.txt
+
+          FPR=$(grep -A5 'REGRESSION SUITE' /tmp/metrics.txt | grep 'FPR:' | grep -oE '[0-9]+\.[0-9]+' | head -1)
+          RECALL=$(grep -A5 'REGRESSION SUITE' /tmp/metrics.txt | grep 'recall:' | grep -oE '[0-9]+\.[0-9]+' | head -1)
+          PRECISION=$(grep -A5 'REGRESSION SUITE' /tmp/metrics.txt | grep 'precision:' | grep -oE '[0-9]+\.[0-9]+' | head -1)
+
+          echo "recall=$RECALL precision=$PRECISION fpr=$FPR"
+
+          # A false positive against a guest is the failure this project cares most about,
+          # so the bar is exact rather than approximate.
+          [ "$FPR" = "0.00" ]      || { echo "::error::regression FPR is $FPR, must be 0.00"; exit 1; }
+          [ "$RECALL" = "100.0" ]  || { echo "::error::regression recall is $RECALL, must be 100.0"; exit 1; }
+          [ "$PRECISION" = "100.0" ] || { echo "::error::regression precision is $PRECISION, must be 100.0"; exit 1; }
+
+      - name: Per-case ledger is reproducible
+        run: |
+          set -euo pipefail
+          swiftc -O WayzyyChat/Moderation/*.swift tools/percase/main.swift -o /tmp/percase
+          /tmp/percase > /tmp/ledger.tsv
+          # No innocent case may be enforced on.
+          if sed -n '/=== FALSE POSITIVES/,/=== INNOCENTS/p' /tmp/ledger.tsv | grep -qv 'none'; then
+            sed -n '/=== FALSE POSITIVES/,/=== INNOCENTS/p' /tmp/ledger.tsv
+          fi
+          sed -n '/=== FALSE POSITIVES/,/=== INNOCENTS/p' /tmp/ledger.tsv | grep -q 'none' \
+            || { echo "::error::per-case ledger reports false positives"; exit 1; }
+          sed -n '/=== TOTALS/,$p' /tmp/ledger.tsv
+
+  # The HTTP surface. Distinct from the engine tests: these assert the properties that only
+  # exist once there is a transport — authentication, admission control, idempotency — and they
+  # run against a real listening socket rather than a mocked one.
+  http:
+    name: HTTP contract
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    container: swift:5.9-jammy
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build
+        run: swift build
+
+      - name: Refuses to start without a token
+        run: |
+          set -euo pipefail
+          # An unauthenticated endpoint accepts forged reports and blocks against any sender,
+          # so starting open must be a deliberate act rather than an omission.
+          if WAYZYY_PORT=8081 WAYZYY_TIER3=off timeout 10 ./.build/debug/wayzyy-moderate-http; then
+            echo "::error::server started with no WAYZYY_API_TOKEN"; exit 1
+          fi
+          echo "refused as expected"
+
+      - name: Start server
+        run: |
+          WAYZYY_API_TOKEN=ci-token \
+          WAYZYY_PORT=8080 \
+          WAYZYY_TIER3=off \
+          WAYZYY_DECISION_LOG=/tmp/ci-decisions.jsonl \
+          WAYZYY_RATE_BURST=5 \
+          WAYZYY_RATE_PER_SECOND=1 \
+          ./.build/debug/wayzyy-moderate-http > /tmp/server.log 2>&1 &
+          for _ in $(seq 1 30); do
+            if curl -sf -o /dev/null http://127.0.0.1:8080/health; then break; fi
+            sleep 1
+          done
+          curl -sf -o /dev/null http://127.0.0.1:8080/health
+
+      - name: Contract
+        run: |
+          set -euo pipefail
+          T="Authorization: Bearer ci-token"
+          code() { curl -s -o /dev/null -w '%{http_code}' "$@"; }
+
+          # Probes need no credential.
+          [ "$(code http://127.0.0.1:8080/health)" = "200" ]
+
+          # Tier 3 is explicitly off here, so readiness is satisfied.
+          [ "$(code http://127.0.0.1:8080/ready)" = "200" ]
+
+          # Auth is enforced, and enforced before anything else.
+          [ "$(code -X POST http://127.0.0.1:8080/v1/moderate -d '{"text":"hi"}')" = "401" ]
+
+          # A real decision.
+          OUT=$(curl -s -X POST http://127.0.0.1:8080/v1/moderate -H "$T" \
+            -d '{"id":"ci-1","text":"call me on 9876543210","senderID":"s","conversationID":"c"}')
+          echo "$OUT"
+          echo "$OUT" | grep -q '"action":"mask"'
+
+          # A retry with different text must return the stored decision, not a new one: a
+          # timeout must never be able to change an outcome.
+          REPLAY=$(curl -s -X POST http://127.0.0.1:8080/v1/moderate -H "$T" \
+            -d '{"id":"ci-1","text":"completely different","senderID":"s","conversationID":"c"}')
+          echo "$REPLAY"
+          echo "$REPLAY" | grep -q '"idempotentReplay":true'
+          echo "$REPLAY" | grep -q '"action":"mask"'
+
+          # Size cap.
+          python3 -c "print('{\"text\":\"' + 'a'*40000 + '\"}')" > /tmp/big.json
+          [ "$(code -X POST http://127.0.0.1:8080/v1/moderate -H "$T" --data-binary @/tmp/big.json)" = "413" ]
+
+          # Unknown route.
+          [ "$(code -X POST http://127.0.0.1:8080/v1/nope -H "$T" -d '{}')" = "404" ]
+
+          # Admission control: the burst is 5, so a rapid run must produce 429s.
+          LIMITED=0
+          for i in $(seq 1 15); do
+            C=$(code -X POST http://127.0.0.1:8080/v1/moderate -H "$T" -d "{\"id\":\"rl-$i\",\"text\":\"hello\",\"senderID\":\"s\",\"conversationID\":\"c-$i\"}")
+            [ "$C" = "429" ] && LIMITED=$((LIMITED+1)) || true
+          done
+          [ "$LIMITED" -gt 0 ] || { echo "::error::rate limiter never engaged"; exit 1; }
+          echo "rate limited $LIMITED of 15"
+
+          # Metrics expose the two conditions that make this service quietly wrong.
+          M=$(curl -s -H "$T" http://127.0.0.1:8080/metrics)
+          echo "$M" | grep -q '^wayzyy_action_total{action="mask"}'
+          echo "$M" | grep -q '^wayzyy_tier3_available'
+          echo "$M" | grep -q '^wayzyy_decision_store_failures_total 0'
+
+          # Metrics require the same bearer token as the write path.
+          [ "$(code http://127.0.0.1:8080/metrics)" = "401" ]
+
+          # Decisions were actually written.
+          grep -q '"requestID":"ci-1"' /tmp/ci-decisions.jsonl
+
+          # The decision lookup exists and behaves. Tier 3 is off in this job, so there is no
+          # adjudication to find — the point is that the route works and reports honestly.
+          S=$(curl -s -H "$T" 'http://127.0.0.1:8080/v1/decision?id=ci-1')
+          echo "$S"
+          echo "$S" | grep -q '"found":true'
+          echo "$S" | grep -q '"superseded":false'
+          [ "$(code -H "$T" 'http://127.0.0.1:8080/v1/decision?id=absent')" = "404" ]
+          [ "$(code -H "$T" 'http://127.0.0.1:8080/v1/decision')" = "400" ]
+
+      - name: Logs carry no message text
+        run: |
+          set -euo pipefail
+          # A log aggregator is a much wider audience than the conversation was.
+          if grep -q '9876543210' /tmp/server.log; then
+            echo "::error::message content leaked into the logs"; cat /tmp/server.log; exit 1
+          fi
+          echo "clean"
+          cat /tmp/server.log
+
+  # Builds the runtime image. The Dockerfile runs the invariant gate during the build, so this
+  # job failing means either the image cannot be assembled or a guarantee was violated.
+  image:
+    name: Container image
+    runs-on: ubuntu-latest
+    needs: [linux, http]
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: false
+          load: true
+          tags: wayzyy/moderation:${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: The image runs and reports itself unready without an adjudicator
+        run: |
+          set -euo pipefail
+          # WAYZYY_REQUIRE_TIER3 is set in the image, so with no credentials the container must
+          # refuse to start rather than serve while holding messages permanently.
+          if docker run --rm -e WAYZYY_API_TOKEN=t wayzyy/moderation:${{ github.sha }}; then
+            echo "::error::container started with no adjudicator despite WAYZYY_REQUIRE_TIER3"
+            exit 1
+          fi
+          echo "refused as expected"
+
+          # With Tier 3 explicitly disabled it should come up and serve.
+          docker run -d --name probe -p 8080:8080 \
+            -e WAYZYY_API_TOKEN=t -e WAYZYY_TIER3=off \
+            wayzyy/moderation:${{ github.sha }}
+          for _ in $(seq 1 30); do
+            if curl -sf -o /dev/null http://127.0.0.1:8080/health; then break; fi
+            sleep 1
+          done
+          curl -sf http://127.0.0.1:8080/ready
+          curl -s -X POST http://127.0.0.1:8080/v1/moderate \
+            -H 'Authorization: Bearer t' \
+            -d '{"id":"img-1","text":"call me on 9876543210","senderID":"s","conversationID":"c"}' | grep -q '"action":"mask"'
+          docker logs probe
+          docker rm -f probe
+
+      - name: The shipped image actually loads the model
+        run: |
+          set -euo pipefail
+          # The router degrades silently: missing weights produce a working service that is
+          # simply worse at unlisted abuse, and nothing errors. So the image has to be asked
+          # whether it loaded them.
+          docker run -d --name modelprobe -p 8081:8080 \
+            -e WAYZYY_API_TOKEN=t -e WAYZYY_TIER3=off \
+            wayzyy/moderation:${{ github.sha }}
+          for _ in $(seq 1 30); do
+            if curl -sf -o /dev/null http://127.0.0.1:8081/health; then break; fi
+            sleep 1
+          done
+          READY=$(curl -s -H 'Authorization: Bearer t' http://127.0.0.1:8081/ready)
+          echo "$READY"
+          echo "$READY" | grep -q 'Abuse router loaded'
+          echo "$READY" | grep -qv 'No abuse router weights'
+          # Unauthenticated probes must not see internals.
+          BARE=$(curl -s http://127.0.0.1:8081/ready)
+          echo "$BARE" | grep -q '"ok":true'
+          echo "$BARE" | grep -qv 'Abuse router loaded'
+
+          # And that it changes a verdict: Hinglish abuse absent from the lexicon must route.
+          OUT=$(curl -s -X POST http://127.0.0.1:8081/v1/moderate \
+            -H 'Authorization: Bearer t' \
+            -d '{"id":"router-1","text":"Chal chutiye","senderID":"s","conversationID":"c"}')
+          echo "$OUT"
+          echo "$OUT" | grep -q 'LEARNED_ABUSE'
+          docker rm -f modelprobe
+
+      - name: Confirm the runtime image carries no toolchain
+        run: |
+          set -euo pipefail
+          # The runtime stage should contain a binary and its libraries, not a compiler.
+          if docker run --rm --entrypoint sh wayzyy/moderation:${{ github.sha }} -c 'command -v swift'; then
+            echo "::error::swift toolchain present in the runtime image"; exit 1
+          fi
+          echo "no toolchain, as intended"
+
+      - name: Publish
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Push
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          tags: |
+            ghcr.io/${{ github.repository_owner }}/moderation:${{ github.sha }}
+            ghcr.io/${{ github.repository_owner }}/moderation:latest
+          cache-from: type=gha

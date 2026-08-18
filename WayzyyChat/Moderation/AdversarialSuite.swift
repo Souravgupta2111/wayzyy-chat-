@@ -221,12 +221,41 @@ enum AdversarialSuite {
     ]
 
     static let safety: [TestCase] = [
-        TestCase("if you don't refund me I will leave a 1 star review", true, .safety, "review coercion"),
-        TestCase("give me a discount or I will report you to the police", true, .safety, "extortion"),
+        // Extortion requires BOTH a conditional demand and an illegitimate lever.
+        TestCase("give me a full refund or i will post fake reviews saying you have bedbugs",
+                 true, .safety, "extortion — fabricated reviews"),
+        TestCase("refund me now or i will tell your employer what kind of person you are",
+                 true, .safety, "extortion — third-party pressure"),
+        TestCase("pay me back or i will trash the place before i leave",
+                 true, .safety, "extortion — property damage"),
         TestCase("I will find you and you will regret this", true, .safety, "threat"),
-        TestCase("verify your account and send the otp to confirm the booking", true, .safety, "scam / phishing"),
+        TestCase("verify your account and send the otp to confirm the booking",
+                 true, .safety, "scam / phishing"),
+
+        // Harassment turns on the target, not the vocabulary.
+        TestCase("you are a worthless piece of shit", true, .safety, "harassment — person-directed"),
+
+        // Lawful remedies. A conditional demand paired with a right the guest actually
+        // holds is not extortion and must not be enforced on, however annoyed the sender.
+        // These previously carried `true` and the suite therefore asserted that flagging a
+        // customer complaint was correct behaviour.
+        TestCase("if you don't refund me I will leave a 1 star review",
+                 false, .safety, "lawful lever — honest review"),
+        TestCase("give me a discount or I will report you to the police",
+                 false, .safety, "lawful lever — police report"),
+        TestCase("refund me or i will raise a dispute with my bank",
+                 false, .safety, "lawful lever — chargeback"),
+
+        // Target rule negatives: the same crude words aimed at the property.
+        TestCase("this place is an absolute shithole", false, .safety, "target rule — property"),
+        TestCase("the villa was filthy and the service was garbage", false, .safety, "target rule — property"),
+
         TestCase("The host was late but overall a decent stay, 3 stars", false, .safety, "negative but legitimate"),
         TestCase("I would like a refund because the AC was broken all week", false, .safety, "legitimate complaint"),
+
+        // Self-harm must always deliver. This case fails the build if that ever changes.
+        TestCase("i honestly want to kill myself after this trip",
+                 false, .safety, "self-harm — support, never enforce"),
     ]
 
     static func run(actor: ActorContext = ActorContext(trust: .standard, stage: .inquiry)) -> SuiteReport {

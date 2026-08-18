@@ -450,7 +450,7 @@ enum Lex {
         "uk", "de", "fr", "es", "it", "nl", "ru", "cn", "jp", "au", "ca", "gg",
     ]
 
-    static let threatPhrases: [String] = [
+    static var threatPhrases: [String] = [
         "i will kill you", "ill kill you", "i'll kill you", "kill you",
         "i will find you", "ill find you", "i'll find you", "i know where you live",
         "watch your back", "you are dead", "youre dead", "you're dead",
@@ -470,7 +470,7 @@ enum Lex {
         "haddi tod dunga", "haath pair tod dunga",
     ]
 
-    static let harassmentPhrases: [String] = [
+    static var harassmentPhrases: [String] = [
         "shut up", "you idiot", "you are stupid", "youre stupid", "you're stupid",
         "you are an idiot", "get lost", "you are useless", "youre useless",
         "you are trash", "pathetic loser", "you are a liar", "moron", "imbecile",
@@ -540,7 +540,7 @@ enum Lex {
         "situation", "experience", "trip", "holiday", "booking", "everything", "this",
     ]
 
-    static let coercionPhrases: [String] = [
+    static var coercionPhrases: [String] = [
         "or i will report", "or ill report", "or i'll report", "or i report you",
         "or i will leave a bad review", "or ill leave a bad review",
         "or i will give you one star", "or ill give you 1 star",
@@ -567,7 +567,7 @@ enum Lex {
         "wire the money", "send money first", "pay before i confirm",
     ]
 
-    static let sexualPhrases: [String] = [
+    static var sexualPhrases: [String] = [
         "send me nudes", "send me nude", "send me naked", "send me your nudes",
         "send me photos of you", "send me a photo of you", "send me pics of you",
         "send me pictures of yourself", "naked photos", "nude photos",
@@ -577,7 +577,7 @@ enum Lex {
         "sexual favor", "in exchange for sex",
     ]
 
-    static let selfHarmPhrases: [String] = [
+    static var selfHarmPhrases: [String] = [
         "kill myself", "end my life", "want to die", "suicide", "suicidal",
         "no reason to live", "end it all", "hurt myself", "harm myself",
     ]
@@ -704,5 +704,56 @@ enum Lex {
         }
         guard diffs.count == 2, diffs[1] == diffs[0] + 1 else { return false }
         return x[diffs[0]] == y[diffs[1]] && x[diffs[1]] == y[diffs[0]]
+    }
+}
+
+// MARK: - Bootstrap sealing
+//
+// Five of the safety phrase lists and the slur set are `static var` because they are extended
+// during bootstrap: `NativeScriptSafety.register` appends Devanagari and Cyrillic phrases, and
+// `SlurLexicon.bootstrap` installs the slur set from configuration. After that they are read on
+// every single evaluation and never written again.
+//
+// That makes them shared mutable state on the hottest path in the system, and there are two
+// ways to make it safe. Locking every read is the obvious one and the wrong one: these lists are
+// consulted many times per message, so the cost lands on every message forever in order to
+// protect against a write that only ever happens at startup.
+//
+// The alternative is to make "immutable after startup" a property the type enforces rather than
+// a convention the next person has to notice. Bootstrap extends the lists, the engine seals
+// them before serving anything, and a write after sealing traps immediately with an explanation
+// instead of corrupting a read somewhere else and being debugged as a mystery six months later.
+//
+// The cost of this choice is that reloading the slur list means restarting the process. For a
+// containerised deployment that is a rolling restart, which is a better trade than paying a lock
+// on every read of every message to support an operation performed a few times a year.
+
+extension Lex {
+
+    private static let sealLock = NSLock()
+    private static var _sealed = false
+
+    /// Whether the lexicons are final. Exposed so a deployment can assert it before serving.
+    static var isSealed: Bool {
+        sealLock.lock()
+        defer { sealLock.unlock() }
+        return _sealed
+    }
+
+    /// Called once, after bootstrap, before the first evaluation.
+    static func seal() {
+        sealLock.lock()
+        _sealed = true
+        sealLock.unlock()
+    }
+
+    /// Guard placed at every mutation site.
+    static func requireMutable(_ what: String) {
+        precondition(!isSealed, """
+            \(what) was modified after bootstrap sealed the lexicons. The safety phrase lists are \
+            read without synchronisation on every evaluation, so they must be final before the \
+            first one; a later write is a data race, not a configuration change. To pick up a new \
+            lexicon, restart the process.
+            """)
     }
 }

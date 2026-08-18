@@ -18,10 +18,17 @@ xcuserdata/
 # macOS
 .DS_Store
 
-# Verification harness binaries and SwiftPM build products
+# Local scratch for exploratory probes. Anything CI or the documents depend on lives in
+# tools/ and is tracked — a build that only works on one laptop is not a build.
 .verify/
 .build/
 *.o
 
-# Local model probe scratch
-/tmp_probe*
+# Generated measurement data. The harness that produces it is tracked; the output is not,
+# so a stale file can never be mistaken for a fresh run.
+tools/percase/ledger.tsv
+
+# Python
+__pycache__/
+*.pyc
+*.pyo

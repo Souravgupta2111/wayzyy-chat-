@@ -36,7 +36,7 @@ struct Policy {
         var criticalSeverity: [String]
 
         static let v1 = Configuration(
-            version: "2026-08-08.v1",
+            version: "2026-08-18.v2",
             baseThresholds: .base,
             trustOffsets: [:],
             stageOffsets: [:],
@@ -48,8 +48,11 @@ struct Policy {
             safetyActions: [
                 ModCategory.threat.rawValue:     ModAction.block.rawValue,
                 ModCategory.sexual.rawValue:     ModAction.block.rawValue,
-                ModCategory.coercion.rawValue:   ModAction.review.rawValue,
+                // No human review queue exists. Coercion and discrimination used to map to
+                // `review`, which held the message forever. They withhold as `block`.
+                ModCategory.coercion.rawValue:   ModAction.block.rawValue,
                 ModCategory.harassment.rawValue: ModAction.warn.rawValue,
+                ModCategory.discrimination.rawValue: ModAction.block.rawValue,
             ],
             scamBlockConfidence: 0.95,
             provisionalHoldEnabled: true,
@@ -75,11 +78,38 @@ struct Policy {
         }
     }
 
-    static var current: Configuration = .v1
+    // The active configuration is behind a lock.
+    //
+    // `Configuration` is a multi-field struct, so an unsynchronised static var is not merely
+    // stale-prone under concurrency — a read racing a write observes a torn value and can
+    // crash outright. Verified: concurrent evaluation with rollout in flight segfaulted
+    // before this lock existed.
+    //
+    // Reads are short and uncontended in the normal case, because each evaluation takes
+    // exactly one snapshot at request entry rather than reading repeatedly.
+    private static let configLock = NSLock()
+    private static var _current: Configuration = .v1
+
+    static var current: Configuration {
+        get {
+            configLock.lock()
+            defer { configLock.unlock() }
+            return _current
+        }
+        set {
+            configLock.lock()
+            _current = newValue
+            configLock.unlock()
+        }
+    }
 
     static var provisionalHoldEnabled: Bool {
         get { current.provisionalHoldEnabled }
-        set { current.provisionalHoldEnabled = newValue }
+        set {
+            configLock.lock()
+            _current.provisionalHoldEnabled = newValue
+            configLock.unlock()
+        }
     }
 
     static var criticalSeverity: Set<ModCategory> { current.criticalCategories }
@@ -90,8 +120,19 @@ struct Policy {
         let reasonCodes: [String]
     }
 
-    static func thresholds(for actor: ActorContext) -> Thresholds {
-        let config = current
+    /// Take one immutable copy of the active configuration.
+    ///
+    /// A verdict must be decided against a single policy version. Reading the global
+    /// repeatedly during one evaluation means a config change mid-request could apply a
+    /// threshold from one version and an action table from another, producing a verdict that
+    /// matches no policy that ever existed — and stamping it with whichever version was read
+    /// last. Callers take a snapshot once and pass it down.
+    ///
+    /// `Configuration` is a value type, so the snapshot cannot be mutated behind the caller.
+    static func snapshot() -> Configuration { current }
+
+    static func thresholds(for actor: ActorContext,
+                           config: Configuration = Policy.current) -> Thresholds {
         var t = config.baseThresholds
         let trust = config.trustOffsets[actor.trust.rawValue] ?? actor.trust.thresholdOffset
         let stage = config.stageOffsets[actor.stage.rawValue] ?? actor.stage.thresholdOffset
@@ -110,10 +151,10 @@ struct Policy {
         contactDetections: [Detection],
         safetyFindings: [SafetyRules.Finding],
         actor: ActorContext,
-        advisoryOnly: Bool
+        advisoryOnly: Bool,
+        config: Configuration = Policy.current
     ) -> Decision {
-        let config = current
-        let t = thresholds(for: actor)
+        let t = thresholds(for: actor, config: config)
         var reasons: [String] = []
         var action: ModAction = .allow
 
@@ -172,7 +213,7 @@ struct Policy {
                     action = maxAction(action, .block)
                     reasons.append("SAFETY_PHISHING")
                 } else {
-                    action = maxAction(action, .review)
+                    action = maxAction(action, .block)
                     reasons.append("SAFETY_SCAM")
                 }
 
