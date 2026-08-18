@@ -549,7 +549,22 @@ final class RemoteJudge: SemanticJudge {
         urlRequest.httpBody = try? JSONSerialization.data(withJSONObject: body)
 
         do {
+            #if os(Linux)
+            let (data, response) = try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<(Data, URLResponse), Swift.Error>) in
+                session.dataTask(with: urlRequest) { data, response, error in
+                    if let error = error {
+                        continuation.resume(throwing: error)
+                    } else if let data = data, let response = response {
+                        continuation.resume(returning: (data, response))
+                    } else {
+                        let unknownError = NSError(domain: NSURLErrorDomain, code: NSURLErrorBadServerResponse, userInfo: nil)
+                        continuation.resume(throwing: unknownError)
+                    }
+                }.resume()
+            }
+            #else
             let (data, response) = try await session.data(for: urlRequest)
+            #endif
             guard let http = response as? HTTPURLResponse else {
                 return recordFailure("No HTTP response from provider.", elapsed())
             }
@@ -582,10 +597,14 @@ final class RemoteJudge: SemanticJudge {
                 // another 429. Fix: copy the chosen model locally under the lock, then
                 // pass it down as a local `Configuration` rather than mutating self.
                 if allowModelFallback, http.statusCode == 429 {
-                    let maybeNext: String? = stateLock.withLock {
-                        guard !fallbackModels.isEmpty else { return nil }
-                        return fallbackModels.removeFirst()
+                    stateLock.lock()
+                    let maybeNext: String?
+                    if !fallbackModels.isEmpty {
+                        maybeNext = fallbackModels.removeFirst()
+                    } else {
+                        maybeNext = nil
                     }
+                    stateLock.unlock()
                     if let next = maybeNext {
                         var retryConfig = configuration
                         retryConfig.model = next

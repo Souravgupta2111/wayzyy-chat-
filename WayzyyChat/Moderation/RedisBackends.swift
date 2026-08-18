@@ -507,7 +507,11 @@ enum OpenSSL {
 
     static func SSL_library_init() {
         typealias F = @convention(c) () -> Int32
-        _ = sym("OPENSSL_init_ssl") as F? ?? { _ = (sym("SSL_library_init") as F?)?(); return 1 }()
+        if let initSSL = sym("OPENSSL_init_ssl") as F? {
+            _ = initSSL()
+        } else if let legacyInit = sym("SSL_library_init") as F? {
+            _ = legacyInit()
+        }
         _ = (sym("OPENSSL_init_ssl") as (@convention(c) (UInt64, UnsafeRawPointer?) -> Int32)?)?(0, nil)
     }
 

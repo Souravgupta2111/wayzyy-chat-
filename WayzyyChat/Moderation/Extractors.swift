@@ -29,7 +29,7 @@ struct RX {
     init(_ name: String, _ pattern: String, _ options: NSRegularExpression.Options = [.caseInsensitive]) {
         self.name = name
         self.rx = (try? NSRegularExpression(pattern: pattern, options: options))
-            ?? NSRegularExpression()
+            ?? (try! NSRegularExpression(pattern: "(?!)"))
     }
 
     struct Match {
