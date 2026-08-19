@@ -161,13 +161,18 @@ func route(_ request: HTTPRequest) -> HTTPResponse {
 
     // Prefer identity over address: addresses are shared behind NAT, so limiting by address
     // alone would let one noisy tenant throttle everyone sharing its egress.
-    let limit = limiter.admit(caller == "anonymous" ? request.peer : caller)
-    guard limit.allowed else {
-        Metrics.shared.recordRateLimited()
-        status = 429
-        var response = HTTPResponse.error(429, "rate limit exceeded")
-        response.extraHeaders["Retry-After"] = "\(limit.retryAfter)"
-        return response
+    // Scrapes must not share that bucket: a burst of chat traffic would 429 Prometheus
+    // exactly when the counters are needed (and the HTTP contract job failed the same way).
+    let pathOnly = request.path.split(separator: "?", maxSplits: 1).first.map(String.init) ?? request.path
+    if pathOnly != "/metrics" {
+        let limit = limiter.admit(caller == "anonymous" ? request.peer : caller)
+        guard limit.allowed else {
+            Metrics.shared.recordRateLimited()
+            status = 429
+            var response = HTTPResponse.error(429, "rate limit exceeded")
+            response.extraHeaders["Retry-After"] = "\(limit.retryAfter)"
+            return response
+        }
     }
 
     if request.body == Data("__oversized__".utf8) {
