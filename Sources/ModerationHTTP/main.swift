@@ -161,10 +161,10 @@ func route(_ request: HTTPRequest) -> HTTPResponse {
 
     // Prefer identity over address: addresses are shared behind NAT, so limiting by address
     // alone would let one noisy tenant throttle everyone sharing its egress.
-    // Scrapes must not share that bucket: a burst of chat traffic would 429 Prometheus
-    // exactly when the counters are needed (and the HTTP contract job failed the same way).
-    let pathOnly = request.path.split(separator: "?", maxSplits: 1).first.map(String.init) ?? request.path
-    if pathOnly != "/metrics" {
+    // Only the write path is limited. GET /metrics and GET /v1/decision are how ops and the
+    // chat backend recover after a burst; putting them in the same bucket 429s scrapes and
+    // lookups exactly when they are needed.
+    if request.method == "POST" {
         let limit = limiter.admit(caller == "anonymous" ? request.peer : caller)
         guard limit.allowed else {
             Metrics.shared.recordRateLimited()

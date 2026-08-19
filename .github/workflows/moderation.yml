@@ -172,7 +172,7 @@ jobs:
 
       - name: Start server
         run: |
-          WAYZYY_API_TOKEN=ci-token \
+          WAYZYY_API_TOKEN=ci-token,ci-burst \
           WAYZYY_PORT=8080 \
           WAYZYY_TIER3=off \
           WAYZYY_DECISION_LOG=/tmp/ci-decisions.jsonl \
@@ -222,9 +222,11 @@ jobs:
           [ "$(code -X POST http://127.0.0.1:8080/v1/nope -H "$T" -d '{}')" = "404" ]
 
           # Admission control: the burst is 5, so a rapid run must produce 429s.
+          # Use a separate token so this does not empty the bucket for later lookups.
+          B="Authorization: Bearer ci-burst"
           LIMITED=0
           for i in $(seq 1 15); do
-            C=$(code -X POST http://127.0.0.1:8080/v1/moderate -H "$T" -d "{\"id\":\"rl-$i\",\"text\":\"hello\",\"senderID\":\"s\",\"conversationID\":\"c-$i\"}")
+            C=$(code -X POST http://127.0.0.1:8080/v1/moderate -H "$B" -d "{\"id\":\"rl-$i\",\"text\":\"hello\",\"senderID\":\"s\",\"conversationID\":\"c-$i\"}")
             [ "$C" = "429" ] && LIMITED=$((LIMITED+1)) || true
           done
           [ "$LIMITED" -gt 0 ] || { echo "::error::rate limiter never engaged"; exit 1; }
@@ -232,9 +234,9 @@ jobs:
 
           # Metrics expose the two conditions that make this service quietly wrong.
           M=$(curl -s -H "$T" http://127.0.0.1:8080/metrics)
-          echo "$M" | grep -q '^wayzyy_action_total{action="mask"}'
-          echo "$M" | grep -q '^wayzyy_tier3_available'
-          echo "$M" | grep -q '^wayzyy_decision_store_failures_total 0'
+          grep -q '^wayzyy_action_total{action="mask"}' <<<"$M"
+          grep -q '^wayzyy_tier3_available' <<<"$M"
+          grep -q '^wayzyy_decision_store_failures_total 0' <<<"$M"
 
           # Metrics require the same bearer token as the write path.
           [ "$(code http://127.0.0.1:8080/metrics)" = "401" ]
