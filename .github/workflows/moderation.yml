@@ -361,6 +361,12 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      # GHCR (and Docker) require the repository path to be lowercase. github.repository_owner
+      # follows the GitHub login, which may contain capitals.
+      - name: Lowercase image name
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: echo "GHCR_IMAGE=ghcr.io/$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')/moderation" >> "$GITHUB_ENV"
+
       - name: Push
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         uses: docker/build-push-action@v5
@@ -368,6 +374,6 @@ jobs:
           context: .
           push: true
           tags: |
-            ghcr.io/${{ github.repository_owner }}/moderation:${{ github.sha }}
-            ghcr.io/${{ github.repository_owner }}/moderation:latest
+            ${{ env.GHCR_IMAGE }}:${{ github.sha }}
+            ${{ env.GHCR_IMAGE }}:latest
           cache-from: type=gha
