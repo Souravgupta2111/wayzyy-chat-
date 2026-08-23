@@ -129,34 +129,75 @@ Package.swift              engine as a library + HTTP service target
 
 ---
 
+## Importing the System
+
+The Moderation Engine is a standard Swift Package (SPM) with zero third-party dependencies, meaning it's incredibly easy to drop into an iOS client, a macOS server, or a Linux Docker container.
+
+In your `Package.swift`:
+```swift
+dependencies: [
+    .package(url: "https://github.com/Souravgupta2111/wayzyy-chat-.git", branch: "main")
+],
+targets: [
+    .target(
+        name: "YourTarget",
+        dependencies: [
+            .product(name: "WayzyyModeration", package: "wayzyy-chat-")
+        ]
+    )
+]
+```
+
+Then simply import and evaluate:
+```swift
+import WayzyyModeration
+
+let engine = ModerationEngine(dependencies: ModerationDependencies())
+let verdict = await engine.evaluate("Text to analyze", sender: "user123")
+print(verdict.action) // .allow, .warn, .mask, .block
+```
+
+---
+
 ## Running it
 
 Requires a Swift toolchain. No package dependencies for the engine itself.
 
+### Testing the Engine (CoconutTest)
+
+Our main regression and adversarial suite runs against all edge cases to ensure 100% precision. 
+To run the automated tests against our full 500+ case dataset (`tests.json` & `tests2.json`), run:
+
 ```bash
-# full suite: metrics, adversarial waves, probes, fuzzing, invariants
+# Run the internal metrics, red-team wave 2, probes, audit, and invariants
 ./verify.sh
 
-# inspect the verdict for any message
-swiftc -swift-version 5 -O -o .verify/diag \
-  WayzyyChat/Moderation/*.swift tools/diag/main.swift
-./.verify/diag "call me on 98765 43210"
-./.verify/diag "total is 12,500 for 3 nights"
-
-# tier share, latency percentiles, throughput, corpus inventory
-swiftc -swift-version 5 -O -o .verify/stats/tierstats \
-  WayzyyChat/Moderation/*.swift .verify/stats/main.swift
-./.verify/stats/tierstats
+# Run the dedicated regression suite
+swift run CoconutTest
 ```
 
 `verify.sh` fails if any invariant breaks: regression false-positive rate above zero, recall below 100%, or any wave-2 false positive.
 
-### Tier 3 (optional)
+### Tier 3 (LLM Adjudication)
 
-Tier 3 is **off by default** and the engine runs fully on Tiers 0–2 without it. To enable live adjudication, copy `Secrets.example.json` to `Secrets.json` and add a key — Groq and Gemini both have free tiers. With no key the judge falls back to recorded fixtures, so nothing breaks.
+Tier 3 (the LLM evaluator) is **off by default** and the engine runs fully on Tiers 0–2 deterministically. To enable live AI adjudication for edge-cases (like `CoconutTest` with LLMs enabled):
+
+1. Copy `Secrets.example.json` to `Secrets.json` in the repository root.
+2. Add a Groq or Gemini API key (both have free tiers):
+```json
+{
+  "api_keys": {
+    "groq": "gsk_your_key_here..."
+  }
+}
+```
+3. To run `CoconutTest` using the live Groq/LLM pool:
+```bash
+WAYZYY_TIER3=pooled swift run CoconutTest
+```
+With no key or without the env variable, the judge falls back to recorded deterministic fixtures.
 
 For a fully local setup, point it at Ollama:
-
 ```bash
 ollama serve
 ollama pull llama3.1:8b
