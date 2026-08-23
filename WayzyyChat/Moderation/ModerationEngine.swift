@@ -986,12 +986,7 @@ final class ModerationEngine {
             // as `allow`. The router's flag is the only evidence there is at that point, so
             // discarding it is failing open on precisely the messages the deterministic tiers
             // could not read.
-            let criticalSafety: Set<ModCategory> = [
-                .threat, .sexual, .selfHarm, .coercion, .discrimination,
-            ]
             let safetyShaped = verdict.suspicions.contains(.learnedAbuse)
-                || verdict.suspicions.contains(.conditionalDemand)
-                || verdict.categories.contains { criticalSafety.contains($0) }
             guard safetyShaped, verdict.action == .allow || verdict.action == .hint else {
                 return verdict
             }
