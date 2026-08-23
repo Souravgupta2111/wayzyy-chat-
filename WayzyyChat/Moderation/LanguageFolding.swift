@@ -82,13 +82,110 @@ public struct LeverTaxonomy {
     private static let lawfulSet = Set(lawful)
     private static let illegitimateSet = Set(illegitimate)
 
+    /// Word classes for a review-for-concession bargain. Obvious templates stay in
+    /// the lexicon; this is the shape that still fires when the wording is new.
+    private static let concessionCues: [String] = [
+        "refund", "discount", "waive", "waiver", "comp ", "compensate",
+        "cleaning fee", "paisa", "money back", "pay me", "cover the",
+        "free night", "penalty-free", "penalty free", "half back",
+        "percent back", "% back", "% off", "quietly",
+    ]
+    private static let reputationCues: [String] = [
+        "review", "rating", "ratings", "stars", "star review",
+        "1 star", "one star", "5 star", "five star", "public post",
+        "post this", "posting this",
+    ]
+    private static let exchangeCues: [String] = [
+        " or ", " or i", " unless ", " otherwise", " warna ",
+        " nahi to ", " nahi toh ", " nahin to ", " nahin toh ",
+        " nhi to ", " nhi toh ", " varna ",
+        " still leave", " still give", " still keep",
+        " stays a", " in exchange", " if you", " if i",
+        "won't mention", "will not mention",
+    ]
+    private static let impliedThreatCues: [String] = [
+        "you don't want", "you dont want", "you wouldn't want", "you wouldnt want",
+        "you'll regret", "you will regret", "youll regret",
+        "you don't want this", "going on my public",
+    ]
+    private static let privateSettleCues: [String] = [
+        "between us", "between ourselves", "between ourselves only",
+        "off the record", "keep this private", "keep it private",
+        "settle this between", "sort this between",
+    ]
+    private static let publicPressureCues: [String] = [
+        "escalate it publicly", "escalate this publicly", "escalate publicly",
+        "go public", "going public", "make this public", "make it public",
+        "post this publicly",
+    ]
+    private static let officialRemedyCues: [String] = [
+        "police", "fir", "chargeback", "wayzyy support", "wayzyy",
+        "the platform", "consumer forum", "consumer court", "legal notice",
+    ]
+
+    private static func hasCue(_ haystack: String, _ cues: [String]) -> Bool {
+        cues.contains { haystack.contains($0) }
+    }
+
+    /// Structural features the classifier and Tier 3 can score, not a quote list.
+    public struct BargainSignals: Sendable {
+        public var demand = false
+        public var reputation = false
+        public var exchange = false
+        public var impliedThreat = false
+        public var officialRemedy = false
+        public var privateSettle = false
+        public var publicPressure = false
+
+        public var isBargain: Bool {
+            if officialRemedy { return false }
+            if privateSettle && publicPressure { return true }
+            if impliedThreat && reputation { return true }
+            return demand && reputation && exchange
+        }
+
+        public var coercionPrior: Double {
+            if officialRemedy { return 0 }
+            if privateSettle && publicPressure { return 0.80 }
+            if impliedThreat && reputation { return 0.78 }
+            if demand && reputation && exchange { return 0.82 }
+            if demand && reputation { return 0.46 }
+            if reputation && exchange { return 0.42 }
+            return 0
+        }
+    }
+
+    public static func bargainSignals(in text: String) -> BargainSignals {
+        let h = " \(HinglishFold.foldOtherwise(text).lowercased()) "
+        var s = BargainSignals()
+        s.demand = hasCue(h, concessionCues) || h.contains("%")
+        s.reputation = hasCue(h, reputationCues)
+        s.exchange = hasCue(h, exchangeCues)
+            || h.contains("if you")
+            || h.hasPrefix(" if ")
+        s.impliedThreat = hasCue(h, impliedThreatCues)
+        s.officialRemedy = hasCue(h, officialRemedyCues)
+        s.privateSettle = hasCue(h, privateSettleCues)
+        s.publicPressure = hasCue(h, publicPressureCues)
+        return s
+    }
+
+    /// Reputation used as leverage: a concession demanded in exchange for stars,
+    /// or an implied "you don't want this on your public record" threat.
+    /// Unconditional complaints with no demand are not bargains.
+    public static func isReviewBargain(_ text: String) -> Bool {
+        bargainSignals(in: text).isBargain
+    }
+
     /// Classify the leverage present in a message.
     ///
     /// Illegitimate wins over lawful when both appear — "refund me or I'll report you
-    /// AND post fake reviews" is extortion, not a complaint.
+    /// AND post fake reviews" is extortion, not a complaint. A review-for-money
+    /// bargain is illegitimate even though an unconditional review is lawful.
     public static func classify(_ text: String) -> LeverClass {
-        let haystack = text.lowercased()
+        let haystack = HinglishFold.foldOtherwise(text).lowercased()
         for term in illegitimate where haystack.contains(term) { return .illegitimate }
+        if isReviewBargain(haystack) { return .illegitimate }
         for term in lawful where haystack.contains(term) { return .lawful }
         return .unknown
     }
@@ -208,6 +305,29 @@ public struct HinglishFold {
             previous = mapped
         }
         return String(out)
+    }
+
+    /// `nahi to` / `nahin toh` / `varna` / नहीं तो are the same connective as `warna`.
+    /// Fold them so lexicon and bargain cues only need to know one form.
+    private static let otherwiseRX = try? NSRegularExpression(
+        pattern: #"\b(?:warnaa?|varnaa?|nahi+n?\s+toh?|nhi+\s+toh?)\b"#,
+        options: [.caseInsensitive]
+    )
+
+    public static func foldOtherwise(_ text: String) -> String {
+        var s = text
+        for (from, to) in [
+            ("नहीं तो", "warna"), ("नही तो", "warna"),
+            ("वरना", "warna"), ("वर्ना", "warna"),
+        ] {
+            s = s.replacingOccurrences(of: from, with: to)
+        }
+        guard let rx = otherwiseRX else { return s }
+        let ns = s as NSString
+        return rx.stringByReplacingMatches(
+            in: s, options: [], range: NSRange(location: 0, length: ns.length),
+            withTemplate: "warna"
+        )
     }
 
     /// Skeleton of a whole message, preserving word boundaries so phrase

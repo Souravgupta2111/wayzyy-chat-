@@ -32,6 +32,12 @@ enum SafetyRules {
         "refund-extort",
         #"(?:refund|discount|free|money\s+back|pay\s+me)[^.!?]{0,40}?or\s+i(?:'?ll|\s+will)\s+(?:report|review|rate|complain|leave|tell|call|post|share|expose|contact|inform|trash|damage|ruin|destroy|wreck|break)"#
     )
+    /// Structural bargain: a concession and a reputation lever with an exchange
+    /// connective somewhere between them. Not a quote of any particular message.
+    private static let reviewBargainRX = RX(
+        "review-bargain",
+        #"(?:(?:refund|waive|comp|discount|fee|paisa|%\s*(?:back|off)|quietly|penalty).{0,100}(?:\bor\b|\bunless\b|\bif\b|warna|varna|nahi+n?\s+toh?|nhi+\s+toh?|still|stays|exchange).{0,80}(?:review|rating|stars?)|(?:review|rating|stars?).{0,100}(?:\bor\b|\bunless\b|\bif\b|warna|varna|nahi+n?\s+toh?|nhi+\s+toh?|still|stays|quietly|waive|refund|comp)|(?:don'?t\s+want|wouldn'?t\s+want|you(?:'ll|\s+will)\s+regret).{0,80}(?:review|rating))"#
+    )
 
     static var platformBrandTokens: Set<String> = ["wayzyy"]
 
@@ -357,7 +363,7 @@ enum SafetyRules {
         skeleton: CharView? = nil,
         original: String = ""
     ) -> [Finding] {
-        let text = base.text
+        let text = HinglishFold.foldOtherwise(base.text)
         guard !text.isEmpty else { return [] }
         var findings: [Finding] = []
 
@@ -415,7 +421,7 @@ enum SafetyRules {
         if leverClass == .illegitimate {
             scan(Lex.coercionPhrases, .coercion, 0.78)
 
-            for rx in [coercionRX, reviewThreatRX, refundExtortRX] {
+            for rx in [coercionRX, reviewThreatRX, refundExtortRX, reviewBargainRX] {
                 guard findings.first(where: { $0.category == .coercion }) == nil else { break }
                 for m in rx.matches(in: text, limit: 1) {
                     guard let orig = base.originalRange(m.start, m.end) else { continue }
@@ -423,6 +429,19 @@ enum SafetyRules {
                                             phrase: m.text, range: orig,
                                             lever: .illegitimate))
                 }
+            }
+
+            // Taxonomy already established illegitimate leverage. Do not require the
+            // wording to also match a canned phrase — that overfits eval sets and
+            // misses the next paraphrase.
+            if findings.first(where: { $0.category == .coercion }) == nil {
+                let span = 0..<max(1, min(text.count, 120))
+                let orig = base.originalRange(span.lowerBound, span.upperBound) ?? span
+                findings.append(Finding(
+                    category: .coercion, confidence: 0.86,
+                    phrase: String(text.prefix(80)), range: orig,
+                    lever: .illegitimate
+                ))
             }
         }
 

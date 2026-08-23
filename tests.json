@@ -1,0 +1,910 @@
+[
+  {
+    "id": "CL-01",
+    "type": "single",
+    "role": "guest",
+    "text": "Is breakfast included in the 4 night stay?",
+    "expect_flag": false
+  },
+  {
+    "id": "CL-02",
+    "type": "single",
+    "role": "host",
+    "text": "Checkout is at 11, checkin from 2pm onward",
+    "expect_flag": false
+  },
+  {
+    "id": "CL-03",
+    "type": "single",
+    "role": "guest",
+    "text": "There are 4 of us, 2 adults and 2 kids",
+    "expect_flag": false
+  },
+  {
+    "id": "CL-04",
+    "type": "single",
+    "role": "guest",
+    "text": "We're arriving on the 9th around 6pm, is that ok?",
+    "expect_flag": false
+  },
+  {
+    "id": "CL-05",
+    "type": "single",
+    "role": "host",
+    "text": "The villa has 3 bedrooms and 2 bathrooms",
+    "expect_flag": false
+  },
+  {
+    "id": "CL-06",
+    "type": "single",
+    "role": "guest",
+    "text": "What's the price for 5 nights in December?",
+    "expect_flag": false
+  },
+  {
+    "id": "CL-07",
+    "type": "single",
+    "role": "host",
+    "text": "It's \u20b98500 per night, 3 night minimum on weekends",
+    "expect_flag": false
+  },
+  {
+    "id": "CL-08",
+    "type": "single",
+    "role": "guest",
+    "text": "Can we get an early checkin around 10am?",
+    "expect_flag": false
+  },
+  {
+    "id": "CL-09",
+    "type": "single",
+    "role": "host",
+    "text": "Sure, that works, no extra charge for that",
+    "expect_flag": false
+  },
+  {
+    "id": "CL-10",
+    "type": "single",
+    "role": "guest",
+    "text": "Is there parking for 2 cars?",
+    "expect_flag": false
+  },
+  {
+    "id": "CL-11",
+    "type": "single",
+    "role": "host",
+    "text": "Yes, 2 covered spots right at the gate",
+    "expect_flag": false
+  },
+  {
+    "id": "CL-12",
+    "type": "single",
+    "role": "guest",
+    "text": "How far is the beach, walkable?",
+    "expect_flag": false
+  },
+  {
+    "id": "CL-13",
+    "type": "single",
+    "role": "host",
+    "text": "About 400 meters, 5 minute walk",
+    "expect_flag": false
+  },
+  {
+    "id": "CL-14",
+    "type": "single",
+    "role": "guest",
+    "text": "Do you have a crib for a 1 year old?",
+    "expect_flag": false
+  },
+  {
+    "id": "CL-15",
+    "type": "single",
+    "role": "host",
+    "text": "Yes we can set one up, just let us know a day before",
+    "expect_flag": false
+  },
+  {
+    "id": "CL-16",
+    "type": "single",
+    "role": "guest",
+    "text": "Is the pool heated in December?",
+    "expect_flag": false
+  },
+  {
+    "id": "CL-17",
+    "type": "single",
+    "role": "host",
+    "text": "Not heated, but December water temp is still pleasant",
+    "expect_flag": false
+  },
+  {
+    "id": "CL-18",
+    "type": "single",
+    "role": "guest",
+    "text": "Can we extend by one more night if we like it?",
+    "expect_flag": false
+  },
+  {
+    "id": "CL-19",
+    "type": "single",
+    "role": "host",
+    "text": "Sure, subject to availability, I'll confirm on day 2",
+    "expect_flag": false
+  },
+  {
+    "id": "CL-20",
+    "type": "single",
+    "role": "guest",
+    "text": "Room 204 doesn't have hot water this morning",
+    "expect_flag": false
+  },
+  {
+    "id": "CL-21",
+    "type": "single",
+    "role": "host",
+    "text": "Sorry about that, sending someone in the next 20 minutes",
+    "expect_flag": false
+  },
+  {
+    "id": "CL-22",
+    "type": "single",
+    "role": "guest",
+    "text": "What time does the caretaker usually arrive?",
+    "expect_flag": false
+  },
+  {
+    "id": "CL-23",
+    "type": "single",
+    "role": "host",
+    "text": "Around 9am daily, stays till 6",
+    "expect_flag": false
+  },
+  {
+    "id": "CL-24",
+    "type": "single",
+    "role": "guest",
+    "text": "Is there a nearby ATM, we're short on cash",
+    "expect_flag": false
+  },
+  {
+    "id": "CL-25",
+    "type": "single",
+    "role": "host",
+    "text": "Yes, 2 minutes down the road on the left",
+    "expect_flag": false
+  },
+  {
+    "id": "CL-26",
+    "type": "single",
+    "role": "guest",
+    "text": "Booking reference GPX-MT3AD9C8, can you confirm receipt?",
+    "expect_flag": false
+  },
+  {
+    "id": "CL-27",
+    "type": "single",
+    "role": "host",
+    "text": "Confirmed, thank you, see you on the 9th",
+    "expect_flag": false
+  },
+  {
+    "id": "CL-28",
+    "type": "single",
+    "role": "guest",
+    "text": "Any restaurant recommendations within 5 minutes drive?",
+    "expect_flag": false
+  },
+  {
+    "id": "CL-29",
+    "type": "single",
+    "role": "host",
+    "text": "There's a great shack 3km away, I'll send the name",
+    "expect_flag": false
+  },
+  {
+    "id": "CL-30",
+    "type": "single",
+    "role": "guest",
+    "text": "Can 6 people stay even though listing says max 5?",
+    "expect_flag": false
+  },
+  {
+    "id": "CL-31",
+    "type": "single",
+    "role": "host",
+    "text": "6 is fine, just a small extra guest charge",
+    "expect_flag": false
+  },
+  {
+    "id": "CL-32",
+    "type": "single",
+    "role": "guest",
+    "text": "Is smoking allowed on the balcony?",
+    "expect_flag": false
+  },
+  {
+    "id": "CL-33",
+    "type": "single",
+    "role": "host",
+    "text": "Outdoors only, not inside the rooms please",
+    "expect_flag": false
+  },
+  {
+    "id": "CL-34",
+    "type": "single",
+    "role": "guest",
+    "text": "We'll be there for 7 nights total",
+    "expect_flag": false
+  },
+  {
+    "id": "CL-35",
+    "type": "single",
+    "role": "host",
+    "text": "Noted, I'll block those dates",
+    "expect_flag": false
+  },
+  {
+    "id": "CL-36",
+    "type": "single",
+    "role": "guest",
+    "text": "Does the villa have wifi, what's the speed roughly?",
+    "expect_flag": false
+  },
+  {
+    "id": "CL-37",
+    "type": "single",
+    "role": "host",
+    "text": "Fiber connection, works fine for video calls",
+    "expect_flag": false
+  },
+  {
+    "id": "CL-38",
+    "type": "single",
+    "role": "guest",
+    "text": "Thanks so much, this place looks perfect for our trip",
+    "expect_flag": false
+  },
+  {
+    "id": "CL-39",
+    "type": "single",
+    "role": "host",
+    "text": "Looking forward to hosting you both!",
+    "expect_flag": false
+  },
+  {
+    "id": "CL-40",
+    "type": "single",
+    "role": "guest",
+    "text": "What's included \u2014 towels, toiletries?",
+    "expect_flag": false
+  },
+  {
+    "id": "CE-01",
+    "type": "single",
+    "role": "guest",
+    "text": "Hey can you WhatsApp me on nine eight seven six five four three two one zero",
+    "expect_flag": true
+  },
+  {
+    "id": "CE-02",
+    "type": "single",
+    "role": "guest",
+    "text": "call me at 9\ufe0f\u20e38\ufe0f\u20e37\ufe0f\u20e36\ufe0f\u20e35\ufe0f\u20e34\ufe0f\u20e33\ufe0f\u20e32\ufe0f\u20e31\ufe0f\u20e30\ufe0f\u20e3 once you land",
+    "expect_flag": true
+  },
+  {
+    "id": "CE-03",
+    "type": "single",
+    "role": "guest",
+    "text": "my number is n1ne-eight-s3ven-65-43-21-0",
+    "expect_flag": true
+  },
+  {
+    "id": "CE-04",
+    "type": "single",
+    "role": "host",
+    "text": "easier to coordinate keys if you msg me \u2014 98 76 54 32 10",
+    "expect_flag": true
+  },
+  {
+    "id": "CE-05",
+    "type": "single",
+    "role": "guest",
+    "text": "reach me a t alex [at] gmail [dot] com for the deposit",
+    "expect_flag": true
+  },
+  {
+    "id": "CE-06",
+    "type": "single",
+    "role": "host",
+    "text": "send your ID scan to priya dot host at gmail dawt com",
+    "expect_flag": true
+  },
+  {
+    "id": "CE-07",
+    "type": "single",
+    "role": "guest",
+    "text": "email works better \u2014 r a h u l 1 9 9 2 @ y a h o o . c o m",
+    "expect_flag": true
+  },
+  {
+    "id": "CE-08",
+    "type": "single",
+    "role": "guest",
+    "text": "just UPI it to villa.stays@okhdfcbank if that's easier",
+    "expect_flag": true
+  },
+  {
+    "id": "CE-09",
+    "type": "single",
+    "role": "host",
+    "text": "pay the balance to goastay2024@okicici, saves the platform fee",
+    "expect_flag": true
+  },
+  {
+    "id": "CE-10",
+    "type": "single",
+    "role": "guest",
+    "text": "my telegram is @sunny_traveller99 if you'd rather chat there",
+    "expect_flag": true
+  },
+  {
+    "id": "CE-11",
+    "type": "single",
+    "role": "host",
+    "text": "insta: villa.by.the.sea, dm me your travel dates there instead",
+    "expect_flag": true
+  },
+  {
+    "id": "CE-12",
+    "type": "single",
+    "role": "guest",
+    "text": "add me on whatsapp, t dot me slash rohan underscore k",
+    "expect_flag": true
+  },
+  {
+    "id": "CE-13",
+    "type": "single",
+    "role": "host",
+    "text": "find me on insta at v i l l a d o t g o a, easier to share photos there",
+    "expect_flag": true
+  },
+  {
+    "id": "CE-14",
+    "type": "single",
+    "role": "guest",
+    "text": "here's my number \u2014 9-8-7-6-5-4-3-2-1-0, call anytime",
+    "expect_flag": true
+  },
+  {
+    "id": "CE-15",
+    "type": "single",
+    "role": "host",
+    "text": "9876543210 is my direct line, skip the app for next time",
+    "expect_flag": true
+  },
+  {
+    "id": "CE-16",
+    "type": "single",
+    "role": "guest",
+    "text": "whatsapp me \u2014 ninEightSevenSix five four three two one zero",
+    "expect_flag": true
+  },
+  {
+    "id": "CE-17",
+    "type": "single",
+    "role": "guest",
+    "text": "site link: w w w dot goavillarentals dot com slash book",
+    "expect_flag": true
+  },
+  {
+    "id": "CE-18",
+    "type": "single",
+    "role": "host",
+    "text": "book direct next time, link: bit.ly/goa-villa-direct",
+    "expect_flag": true
+  },
+  {
+    "id": "CE-19",
+    "type": "single",
+    "role": "guest",
+    "text": "sending you my no: \u09ef\u09ee\u09ed\u09ec\u09eb\u09ea\u09e9\u09e8\u09e7\u09e6",
+    "expect_flag": true
+  },
+  {
+    "id": "CE-20",
+    "type": "single",
+    "role": "host",
+    "text": "reachable at \u0669\u0668\u0667\u0666\u0665\u0664\u0663\u0662\u0661\u0660 after 6pm",
+    "expect_flag": true
+  },
+  {
+    "id": "CE-21",
+    "type": "single",
+    "role": "guest",
+    "text": "you can reach me on discord, sunny#4821",
+    "expect_flag": true
+  },
+  {
+    "id": "CE-22",
+    "type": "single",
+    "role": "host",
+    "text": "my mail is s.narayan.stays@rediffmail.com, send the docs there",
+    "expect_flag": true
+  },
+  {
+    "id": "CE-23",
+    "type": "single",
+    "role": "guest",
+    "text": "phone \u2014 9 8 7 6 5 4 3 2 1 0 (yes it's real, just formatted weird lol)",
+    "expect_flag": true
+  },
+  {
+    "id": "CE-24",
+    "type": "single",
+    "role": "host",
+    "text": "vpa for advance: rakesh.villas@paytm",
+    "expect_flag": true
+  },
+  {
+    "id": "CE-25",
+    "type": "single",
+    "role": "guest",
+    "text": "my number: nine-eight-seven-six-five, four-three-two-one-zero",
+    "expect_flag": true
+  },
+  {
+    "id": "CE-26",
+    "type": "single",
+    "role": "host",
+    "text": "quicker on telegram \u2014 t.me/villa_owner_goa",
+    "expect_flag": true
+  },
+  {
+    "id": "CE-27",
+    "type": "single",
+    "role": "guest",
+    "text": "email me the invoice \u2014 j.dsouza1988@hotmail dot com",
+    "expect_flag": true
+  },
+  {
+    "id": "CE-28",
+    "type": "single",
+    "role": "host",
+    "text": "9876543210 \u2014 that's whatsapp, easier than typing here",
+    "expect_flag": true
+  },
+  {
+    "id": "CE-29",
+    "type": "single",
+    "role": "guest",
+    "text": "here's my insta handle for the deposit screenshot: @traveler.k.29",
+    "expect_flag": true
+  },
+  {
+    "id": "CE-30",
+    "type": "single",
+    "role": "host",
+    "text": "text 9876543210, I don't check this app often",
+    "expect_flag": true
+  },
+  {
+    "id": "LM-01",
+    "type": "single",
+    "role": "guest",
+    "text": "bhaiya checkin time kya hai, hum 3pm tak pahunch jayenge",
+    "expect_flag": false
+  },
+  {
+    "id": "LM-02",
+    "type": "single",
+    "role": "host",
+    "text": "checkin 2pm se hai, koi dikkat nahi hogi",
+    "expect_flag": false
+  },
+  {
+    "id": "LM-03",
+    "type": "single",
+    "role": "guest",
+    "text": "parking available hai kya, 2 gaadi honge",
+    "expect_flag": false
+  },
+  {
+    "id": "LM-04",
+    "type": "single",
+    "role": "guest",
+    "text": "advance kitna dena hoga booking confirm karne ke liye",
+    "expect_flag": false
+  },
+  {
+    "id": "LM-05",
+    "type": "single",
+    "role": "host",
+    "text": "advance 20% hota hai, baaki checkin pe",
+    "expect_flag": false
+  },
+  {
+    "id": "LM-06",
+    "type": "single",
+    "role": "guest",
+    "text": "beach kitna door hai walk karke",
+    "expect_flag": false
+  },
+  {
+    "id": "LM-07",
+    "type": "single",
+    "role": "guest",
+    "text": "sir mera number 9876543210 hai, whatsapp pe baat kar lete hain",
+    "expect_flag": true
+  },
+  {
+    "id": "LM-08",
+    "type": "single",
+    "role": "host",
+    "text": "email kar do details, priya.stays@gmail dot com pe",
+    "expect_flag": true
+  },
+  {
+    "id": "LM-09",
+    "type": "single",
+    "role": "guest",
+    "text": "ac room hai kya, garmi bahut lagti hai",
+    "expect_flag": false
+  },
+  {
+    "id": "LM-10",
+    "type": "single",
+    "role": "guest",
+    "text": "hum log 6 log hain total, extra bed milega?",
+    "expect_flag": false
+  },
+  {
+    "id": "LM-11",
+    "type": "single",
+    "role": "host",
+    "text": "extra bed ka charge alag se lagega, 500 rupees",
+    "expect_flag": false
+  },
+  {
+    "id": "LM-12",
+    "type": "single",
+    "role": "guest",
+    "text": "paisa refund kar do warna review kharab likhunga",
+    "expect_flag": true
+  },
+  {
+    "id": "LM-13",
+    "type": "single",
+    "role": "guest",
+    "text": "wifi ka password kya hai",
+    "expect_flag": false
+  },
+  {
+    "id": "LM-14",
+    "type": "single",
+    "role": "host",
+    "text": "checkout ke baad bhi luggage rakh sakte hain, koi tension nahi",
+    "expect_flag": false
+  },
+  {
+    "id": "LM-15",
+    "type": "single",
+    "role": "guest",
+    "text": "thank you itna accha stay tha, phir aayenge",
+    "expect_flag": false
+  },
+  {
+    "id": "CO-01",
+    "type": "single",
+    "role": "guest",
+    "text": "refund me the full amount or I'm mentioning this in my review",
+    "expect_flag": true
+  },
+  {
+    "id": "CO-02",
+    "type": "single",
+    "role": "guest",
+    "text": "give me 50% back quietly and I'll still leave 5 stars",
+    "expect_flag": true
+  },
+  {
+    "id": "CO-03",
+    "type": "single",
+    "role": "guest",
+    "text": "either you refund today or I'm posting photos everywhere",
+    "expect_flag": true
+  },
+  {
+    "id": "CO-04",
+    "type": "single",
+    "role": "host",
+    "text": "I'll remove my bad review if you just cover the damage cost",
+    "expect_flag": true
+  },
+  {
+    "id": "CO-05",
+    "type": "single",
+    "role": "guest",
+    "text": "not asking twice \u2014 refund or the review goes up tonight",
+    "expect_flag": true
+  },
+  {
+    "id": "CO-06",
+    "type": "single",
+    "role": "guest",
+    "text": "just cancel it penalty-free for me, or you'll regret the review",
+    "expect_flag": true
+  },
+  {
+    "id": "CO-07",
+    "type": "single",
+    "role": "guest",
+    "text": "you don't want this going on my public review, do you?",
+    "expect_flag": true
+  },
+  {
+    "id": "CO-08",
+    "type": "single",
+    "role": "guest",
+    "text": "I'm not happy with the AC but I won't mention it if you comp one night",
+    "expect_flag": true
+  },
+  {
+    "id": "CO-09",
+    "type": "single",
+    "role": "guest",
+    "text": "let's settle this between us before I have to escalate it publicly",
+    "expect_flag": true
+  },
+  {
+    "id": "CO-10",
+    "type": "single",
+    "role": "guest",
+    "text": "waive the cleaning fee and this stays a 5 star review",
+    "expect_flag": true
+  },
+  {
+    "id": "CO-11",
+    "type": "single",
+    "role": "guest",
+    "text": "The AC in the bedroom isn't cooling well, could someone take a look tomorrow?",
+    "expect_flag": false
+  },
+  {
+    "id": "CO-12",
+    "type": "single",
+    "role": "guest",
+    "text": "Honestly a bit disappointed with cleanliness, hoping it's better for the rest of the stay",
+    "expect_flag": false
+  },
+  {
+    "id": "MS-01",
+    "type": "multi",
+    "messages": [
+      {
+        "role": "guest",
+        "text": "sure, let me give you my number"
+      },
+      {
+        "role": "guest",
+        "text": "nine eight seven"
+      },
+      {
+        "role": "guest",
+        "text": "six five four"
+      },
+      {
+        "role": "guest",
+        "text": "three two one zero"
+      }
+    ],
+    "expect_flag": true
+  },
+  {
+    "id": "MS-02",
+    "type": "multi",
+    "messages": [
+      {
+        "role": "host",
+        "text": "ok here's how you can reach me directly"
+      },
+      {
+        "role": "host",
+        "text": "98765"
+      },
+      {
+        "role": "host",
+        "text": "43210"
+      }
+    ],
+    "expect_flag": true
+  },
+  {
+    "id": "MS-03",
+    "type": "multi",
+    "messages": [
+      {
+        "role": "guest",
+        "text": "my insta is"
+      },
+      {
+        "role": "guest",
+        "text": "way"
+      },
+      {
+        "role": "guest",
+        "text": "zyy"
+      },
+      {
+        "role": "guest",
+        "text": "official"
+      }
+    ],
+    "expect_flag": true
+  },
+  {
+    "id": "MS-04",
+    "type": "multi",
+    "messages": [
+      {
+        "role": "guest",
+        "text": "nine"
+      },
+      {
+        "role": "guest",
+        "text": "the pool looks great by the way"
+      },
+      {
+        "role": "guest",
+        "text": "eight seven six"
+      },
+      {
+        "role": "guest",
+        "text": "five four three two one zero"
+      }
+    ],
+    "expect_flag": true
+  },
+  {
+    "id": "MS-05",
+    "type": "multi",
+    "messages": [
+      {
+        "role": "host",
+        "text": "9876"
+      },
+      {
+        "role": "host",
+        "text": "checkout is at 11 by the way"
+      },
+      {
+        "role": "host",
+        "text": "543210"
+      }
+    ],
+    "expect_flag": true
+  },
+  {
+    "id": "MS-06",
+    "type": "multi",
+    "messages": [
+      {
+        "role": "guest",
+        "text": "we're 4 people arriving on the 9th"
+      },
+      {
+        "role": "guest",
+        "text": "at around 6pm"
+      },
+      {
+        "role": "guest",
+        "text": "is that fine?"
+      }
+    ],
+    "expect_flag": false
+  },
+  {
+    "id": "MS-07",
+    "type": "multi",
+    "messages": [
+      {
+        "role": "guest",
+        "text": "email works better for me"
+      },
+      {
+        "role": "guest",
+        "text": "sunny dot k"
+      },
+      {
+        "role": "guest",
+        "text": "at gmail"
+      },
+      {
+        "role": "guest",
+        "text": "dot com"
+      }
+    ],
+    "expect_flag": true
+  },
+  {
+    "id": "MS-08",
+    "type": "multi",
+    "messages": [
+      {
+        "role": "host",
+        "text": "there are 3 bedrooms"
+      },
+      {
+        "role": "host",
+        "text": "2 with attached bath"
+      },
+      {
+        "role": "host",
+        "text": "1 shared"
+      }
+    ],
+    "expect_flag": false
+  },
+  {
+    "id": "MS-09",
+    "type": "multi",
+    "messages": [
+      {
+        "role": "guest",
+        "text": "let's move this off the app"
+      },
+      {
+        "role": "guest",
+        "text": "nine eight"
+      },
+      {
+        "role": "guest",
+        "text": "seven six five"
+      },
+      {
+        "role": "guest",
+        "text": "four three two one zero"
+      }
+    ],
+    "expect_flag": true
+  },
+  {
+    "id": "MS-10",
+    "type": "multi",
+    "messages": [
+      {
+        "role": "host",
+        "text": "booking ref is"
+      },
+      {
+        "role": "host",
+        "text": "GPX"
+      },
+      {
+        "role": "host",
+        "text": "MT3AD9C8"
+      }
+    ],
+    "expect_flag": false
+  },
+  {
+    "id": "MS-11",
+    "type": "multi",
+    "messages": [
+      {
+        "role": "guest",
+        "text": "telegram handle"
+      },
+      {
+        "role": "guest",
+        "text": "sunny underscore"
+      },
+      {
+        "role": "guest",
+        "text": "traveller99"
+      }
+    ],
+    "expect_flag": true
+  }
+]

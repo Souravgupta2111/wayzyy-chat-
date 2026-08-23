@@ -94,7 +94,7 @@ struct SafetyCalibration {
         ],
         route: [
             .threat: 0.35, .harassment: 0.40, .sexual: 0.35,
-            .selfHarm: 0.30, .coercion: 0.40, .scam: 0.45,
+            .selfHarm: 0.30, .coercion: 0.32, .scam: 0.45,
         ],
         enforcementEnabled: false
     )
@@ -115,6 +115,8 @@ struct SafetyClassifierInput {
     let addressesPerson: Bool
     let conditionalDemand: Bool
     let propertyDirected: Bool
+    /// 0–1 structural prior from demand + reputation + exchange (or implied threat).
+    let reviewBargainScore: Double
 }
 
 protocol SafetyClassifier {
@@ -152,20 +154,20 @@ final class SignalDerivedSafetyClassifier: SafetyClassifier {
             }
         }
 
-        let novel = input.innocentSimilarity >= 0
-            && input.innocentSimilarity < EscalationAnalyser.innocentFamiliarityFloor
-        if input.addressesPerson && novel {
-            out.raise(.harassment, to: 0.46)
-            out.raise(.threat, to: 0.42)
-        }
         if input.conditionalDemand {
             out.raise(.coercion, to: input.addressesPerson ? 0.52 : 0.44)
+        }
+        if input.reviewBargainScore > 0 {
+            out.raise(.coercion, to: input.reviewBargainScore)
         }
 
         var complaint = 0.0
         if input.propertyDirected { complaint = input.addressesPerson ? 0.58 : 0.72 }
         if input.innocentSimilarity >= 0.30 { complaint = Swift.max(complaint, input.innocentSimilarity) }
         if input.deterministicFindings.contains(where: { $0.confidence >= 0.90 }) { complaint = 0 }
+        // A review-for-money shape is not a complaint. Leave the veto off so the
+        // coercion head can route to the classifier / Tier 3.
+        if input.reviewBargainScore >= 0.55 { complaint = 0 }
         out.set(.legitimateComplaint, complaint)
 
         let elapsed = Double(DispatchTime.now().uptimeNanoseconds - started) / 1_000_000
@@ -498,7 +500,9 @@ extension SafetyCalibration {
         let band = band(for: head, score: score)
         guard band != .allow else { return out }
 
-        let vetoed = scores.legitimateComplaint >= complaintVeto
+        // Complaint veto does not apply to coercion: "refund or I review" is often
+        // property-directed, which would otherwise look like a legitimate complaint.
+        let vetoed = scores.legitimateComplaint >= complaintVeto && head != .coercion
         if vetoed { out.complaintVetoed = true }
 
         switch band {

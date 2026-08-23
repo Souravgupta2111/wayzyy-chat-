@@ -369,14 +369,29 @@ final class RemoteJudge: SemanticJudge {
     demands for money back, and stated intent to review or escalate are all normal \
     customer behaviour.
 
-    What separates blackmail from complaint is the **conditional**, plus dishonesty. \
-    "I want a refund and I am leaving an honest bad review" states two intentions and \
-    is benign. "Refund me or I post fake reviews" makes one contingent on the other \
-    and offers to lie, and is blackmail. Look for the trade being proposed. If the \
-    sender is only describing what they will do, however angrily, answer benign.
+    What separates blackmail from complaint is a **trade**: a concession (money, a \
+    waiver, a fee dropped, silence) made contingent on reputation (stars, a review, a \
+    public post). A refund request with no review lever is a complaint. A review with \
+    no demand is a complaint. Tying one to the other — "this if that", "or else", \
+    "and then the rating stays", an implied "you don't want this public" — is \
+    blackmail whether or not the review would be true. Honesty of the review does \
+    not make a bargain lawful. Police, bank dispute, Wayzyy support, and consumer \
+    forum remain lawful even when paired with a refund demand.
 
-    A demand on its own is not blackmail. A threat of a *truthful* review is not \
-    blackmail. Both need the leverage.
+    A demand on its own is not blackmail. An unconditional review on its own is not \
+    blackmail. The combination as leverage is.
+
+    Asking to settle privately while threatening to go public — "between us" paired \
+    with "escalate publicly", "go public", or "make this public" — is the same trade, \
+    even with no star rating and no refund verb. Escalating to Wayzyy support, the \
+    platform, police, or a bank is not that trade; those are official remedies.
+
+    Do not count as exfiltration: booking references, confirmation codes, PNRs, and \
+    locator tokens (letter-digit strings a host and guest already share for the stay). \
+    "booking ref" followed by a mixed code is logistics.
+
+    Ordinary hospitality that addresses the guest — looking forward to hosting you, \
+    see you both at check-in — is benign. Addressing a person is not harassment.
 
     Judge safety in any language and in romanised spelling — Hindi, Hinglish, Marathi, \
     Konkani, Russian. You know this vocabulary and the lexicons ahead of you do not, so a \

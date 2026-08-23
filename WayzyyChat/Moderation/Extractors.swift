@@ -248,6 +248,39 @@ enum Extractors {
         return out
     }
 
+    /// Reconstructs `local@host.tld` from "sunny dot k at gmail dot com" across one
+    /// message or a joined conversation window.
+    static func spelledEmails(in text: String, effort: Int) -> [Detection] {
+        var s = " \(text.lowercased()) "
+        for (word, symbol) in [
+            (" dot ", "."), (" dawt ", "."), (" point ", "."), (" period ", "."),
+            (" at ", "@"), (" aht ", "@"), (" atsign ", "@"),
+            (" underscore ", "_"),
+        ] {
+            s = s.replacingOccurrences(of: word, with: symbol)
+        }
+        s = s.replacingOccurrences(of: " @", with: "@")
+        s = s.replacingOccurrences(of: "@ ", with: "@")
+        s = s.replacingOccurrences(of: " .", with: ".")
+        s = s.replacingOccurrences(of: ". ", with: ".")
+        var out: [Detection] = []
+        var seen = Set<String>()
+        for m in emailRX.matches(in: s) {
+            guard seen.insert(m.text).inserted else { continue }
+            out.append(Detection(
+                category: .email,
+                range: 0..<max(1, text.count),
+                surface: "",
+                canonical: m.text,
+                confidence: 0.90,
+                transforms: ["spelled-separators"],
+                effort: effort + 2,
+                reason: "Email reconstructed from spelled-out separators"
+            ))
+        }
+        return out
+    }
+
     private static let urlRX = RX(
         "url",
         #"(?:https?://|www\.)[a-z0-9\-._~:/?#\[\]@!$&'()*+,;=%]{3,}"#
@@ -259,55 +292,55 @@ enum Extractors {
 
     private static let ownDomains: Set<String> = ["wayzyy.com", "wayzyy.in", "wayzyy"]
 
+    private static func classifyURL(_ raw: String, explicitScheme: Bool) -> (ModCategory, Double, String)? {
+        let lowered = raw.lowercased()
+        let host = lowered
+            .replacingOccurrences(of: "https://", with: "")
+            .replacingOccurrences(of: "http://", with: "")
+            .replacingOccurrences(of: "www.", with: "")
+            .split(separator: "/").first.map(String.init) ?? lowered
+
+        // Operator allowlist wins outright: this deployment's own hosts are not external.
+        if ownDomains.contains(host) || URLReputation.isAllowlisted(host: host) { return nil }
+
+        // Shape first. Reputation is consulted afterwards and may only raise the result,
+        // so a reputation feed can never talk the engine out of a shape-based finding.
+        var shapeConfidence: Double? = nil
+        var shapeReason: String? = nil
+
+        if Lex.shorteners.contains(host) {
+            shapeConfidence = 0.94
+            shapeReason = "Known link-shortener or deep-link host"
+        } else if host.contains("xn--") {
+            shapeConfidence = 0.92
+            shapeReason = "Punycode domain — deliberately obscured host"
+        } else {
+            let tld = host.split(separator: ".").last.map(String.init) ?? ""
+            if Lex.commonTLDs.contains(tld) {
+                shapeConfidence = 0.68
+                shapeReason = "External link"
+            } else if explicitScheme,
+                      host.contains("."),
+                      tld.count >= 2, tld.count <= 24,
+                      tld.allSatisfy({ $0.isLetter }) {
+                shapeConfidence = 0.68
+                shapeReason = "External link — scheme present, TLD outside allowlist"
+            }
+        }
+
+        guard let (conf, why) = URLReputation.adjust(host: host,
+                                                     shapeConfidence: shapeConfidence,
+                                                     shapeReason: shapeReason)
+        else { return nil }
+        return (.externalURL, conf, why)
+    }
+
     static func urls(base: CharView, effort: Int) -> [Detection] {
         var out: [Detection] = []
         var seen = Set<String>()
 
-        func classify(_ raw: String, explicitScheme: Bool) -> (ModCategory, Double, String)? {
-            let lowered = raw.lowercased()
-            let host = lowered
-                .replacingOccurrences(of: "https://", with: "")
-                .replacingOccurrences(of: "http://", with: "")
-                .replacingOccurrences(of: "www.", with: "")
-                .split(separator: "/").first.map(String.init) ?? lowered
-
-            // Operator allowlist wins outright: this deployment's own hosts are not external.
-            if ownDomains.contains(host) || URLReputation.isAllowlisted(host: host) { return nil }
-
-            // Shape first. Reputation is consulted afterwards and may only raise the result,
-            // so a reputation feed can never talk the engine out of a shape-based finding.
-            var shapeConfidence: Double? = nil
-            var shapeReason: String? = nil
-
-            if Lex.shorteners.contains(host) {
-                shapeConfidence = 0.94
-                shapeReason = "Known link-shortener or deep-link host"
-            } else if host.contains("xn--") {
-                shapeConfidence = 0.92
-                shapeReason = "Punycode domain — deliberately obscured host"
-            } else {
-                let tld = host.split(separator: ".").last.map(String.init) ?? ""
-                if Lex.commonTLDs.contains(tld) {
-                    shapeConfidence = 0.68
-                    shapeReason = "External link"
-                } else if explicitScheme,
-                          host.contains("."),
-                          tld.count >= 2, tld.count <= 24,
-                          tld.allSatisfy({ $0.isLetter }) {
-                    shapeConfidence = 0.68
-                    shapeReason = "External link — scheme present, TLD outside allowlist"
-                }
-            }
-
-            guard let (conf, why) = URLReputation.adjust(host: host,
-                                                         shapeConfidence: shapeConfidence,
-                                                         shapeReason: shapeReason)
-            else { return nil }
-            return (.externalURL, conf, why)
-        }
-
         for m in urlRX.matches(in: base.text) {
-            guard let (cat, conf, why) = classify(m.text, explicitScheme: true),
+            guard let (cat, conf, why) = classifyURL(m.text, explicitScheme: true),
                   let orig = base.originalRange(m.start, m.end),
                   seen.insert(m.text).inserted else { continue }
             out.append(Detection(
@@ -317,7 +350,7 @@ enum Extractors {
         }
 
         for m in bareDomainRX.matches(in: base.text) {
-            guard let (cat, conf, why) = classify(m.text, explicitScheme: false),
+            guard let (cat, conf, why) = classifyURL(m.text, explicitScheme: false),
                   let orig = base.originalRange(m.start, m.end),
                   seen.insert(m.text).inserted else { continue }
             out.append(Detection(
@@ -327,6 +360,32 @@ enum Extractors {
             ))
         }
 
+        return out
+    }
+
+    static func spelledURLs(in text: String, effort: Int) -> [Detection] {
+        var s = " \(text.lowercased()) "
+        for (word, symbol) in [
+            (" dot ", "."), (" dawt ", "."), (" point ", "."), (" period ", ".")
+        ] {
+            s = s.replacingOccurrences(of: word, with: symbol)
+        }
+        s = s.replacingOccurrences(of: " .", with: ".")
+        s = s.replacingOccurrences(of: ". ", with: ".")
+        
+        var out: [Detection] = []
+        var seen = Set<String>()
+        
+        for m in bareDomainRX.matches(in: s) {
+            guard let (cat, conf, why) = classifyURL(m.text, explicitScheme: false),
+                  seen.insert(m.text).inserted else { continue }
+            out.append(Detection(
+                category: cat, range: 0..<max(1, text.count), surface: "", canonical: m.text,
+                confidence: conf, transforms: ["spelled-separators"], effort: effort + 3,
+                reason: why + " (spelled-out domain)"
+            ))
+        }
+        
         return out
     }
 
@@ -381,6 +440,12 @@ enum Extractors {
         "handle-shape",
         #"\b[a-z][a-z0-9]{0,20}(?:[._][a-z0-9]{1,20}){1,8}\b"#
     )
+
+    /// Mail hosts are platforms for email reconstruction, not Instagram-style handles.
+    private static let mailHosts: Set<String> = [
+        "gmail", "yahoo", "hotmail", "outlook", "protonmail", "icloud", "rediff",
+        "mail", "email", "proton",
+    ]
 
     static func handles(
         base: CharView,
@@ -449,6 +514,7 @@ enum Extractors {
             guard Lex.framedPlatforms.contains(token)
                     || Lex.platformsStrong.contains(token)
                     || Lex.platformsWeak.contains(token) else { continue }
+            guard !Self.mailHosts.contains(token) else { continue }
             guard !adjectival.contains(token) else { continue }
 
             var cursor = pos + 1
@@ -489,6 +555,7 @@ enum Extractors {
             let isStrong = Lex.platformsStrong.contains(token)
             let isWeak = Lex.platformsWeak.contains(token)
             guard isStrong || isWeak else { continue }
+            guard !Self.mailHosts.contains(token) else { continue }
 
             guard !adjectival.contains(token) else { continue }
 
@@ -551,15 +618,8 @@ enum Extractors {
                 }
             }
 
-            if !found, isStrong, hasContactIntent,
-               let orig = alpha.originalRange(tokens[idx].start, tokens[idx].end),
-               seen.insert("platform-\(token)").inserted {
-                out.append(Detection(
-                    category: .socialHandle, range: orig, surface: "", canonical: token,
-                    confidence: 0.62, transforms: alpha.transforms, effort: effort,
-                    reason: "Solicitation to move to \(token)"
-                ))
-            }
+            // Do not emit the platform token itself as a handle. "my insta is" /
+            // "at gmail" are frames for a later identifier, not the identifier.
         }
 
         return out
@@ -740,6 +800,31 @@ enum Extractors {
         #"\b(?=[a-z0-9]*[a-z])(?=[a-z0-9]*\d)[a-z][a-z0-9]{3,29}\b"#
     )
 
+    /// Locator / PNR shape: mixed letters and digits, hyphens ok, no handle separators.
+    /// `traveler.k.29` and `sunny_go` stay handles. `MT3AD9C8` and `GPX-MT3AD9C8` do not.
+    static func looksLikeBookingLocator(_ token: String) -> Bool {
+        let t = token.hasPrefix("@") ? String(token.dropFirst()) : token
+        guard t.count >= 5, t.count <= 20 else { return false }
+        guard t.contains(where: \.isNumber), t.contains(where: \.isLetter) else { return false }
+        if t.contains(".") || t.contains("_") || t.contains("@") { return false }
+        
+        var maxLetters = 0
+        var currentLetters = 0
+        for ch in t {
+            if ch.isLetter {
+                currentLetters += 1
+                maxLetters = max(maxLetters, currentLetters)
+            } else {
+                currentLetters = 0
+            }
+        }
+        
+        // Locators rarely have 5 or more consecutive letters. Handlers/names often do.
+        if maxLetters >= 5 { return false }
+        
+        return t.allSatisfy { $0.isLetter || $0.isNumber || $0 == "-" }
+    }
+
     static func bareIdentifiers(
         base: CharView,
         wordTokenCount: Int,
@@ -762,7 +847,11 @@ enum Extractors {
                 guard token.count >= 4, token.count <= 32 else { continue }
                 guard token.filter({ $0.isLetter }).count >= 3 else { continue }
                 let underscored = token.contains("_")
+                let separated = token.contains(".") || underscored
                 guard proseAllowed || underscored else { continue }
+                // Mixed alnum with no separator is a booking locator as often as a handle.
+                // Our improved looksLikeBookingLocator handles this distinction.
+                if looksLikeBookingLocator(token), !hasContactIntent { continue }
 
                 let tail = token.split(separator: ".").last.map(String.init) ?? ""
                 if Lex.commonTLDs.contains(tail) || Lex.upiSuffixes.contains(tail) { continue }

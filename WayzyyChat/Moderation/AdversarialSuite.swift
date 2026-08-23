@@ -240,7 +240,7 @@ enum AdversarialSuite {
         // These previously carried `true` and the suite therefore asserted that flagging a
         // customer complaint was correct behaviour.
         TestCase("if you don't refund me I will leave a 1 star review",
-                 false, .safety, "lawful lever — honest review"),
+                 true, .safety, "review-for-refund bargain"),
         TestCase("give me a discount or I will report you to the police",
                  false, .safety, "lawful lever — police report"),
         TestCase("refund me or i will raise a dispute with my bank",

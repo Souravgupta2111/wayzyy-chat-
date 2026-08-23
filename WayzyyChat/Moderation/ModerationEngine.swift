@@ -294,6 +294,7 @@ final class ModerationEngine {
         detections += Extractors.urls(base: views.base, effort: effort)
         detections += Extractors.urls(base: views.separators, effort: effort)
         detections += Extractors.urls(base: views.separatorsAlt, effort: effort)
+        detections += Extractors.spelledURLs(in: analysed, effort: effort)
         detections += Extractors.emails(
             base: views.separatorsAlt,
             separators: views.separatorsAlt,
@@ -345,6 +346,13 @@ final class ModerationEngine {
                 raw: views.raw,
                 effort: effort
             )
+        }
+
+        detections.removeAll { d in
+            d.category == .socialHandle
+                && Extractors.looksLikeBookingLocator(d.canonical)
+                && !signals.hasContactIntent
+                && !signals.offPlatformIntent
         }
 
         if detections.isEmpty {
@@ -486,12 +494,35 @@ final class ModerationEngine {
                 }
 
                 if assembled.isEmpty {
+                    let windowText = window.joined(separator: " ").lowercased()
+                    let locatorContext = ["booking", "ref", "reference", "confirmation",
+                                          "pnr", "locator", "itinerary"]
+                        .contains { windowText.contains($0) }
+                    let windowPlatform = Lex.platformsStrong.contains { windowText.contains($0) }
+                        || windowText.contains("handle")
+                    if !locatorContext {
+                        assembled += Extractors.handles(
+                            base: joinedViews.base,
+                            alpha: joinedViews.alpha,
+                            effort: effort,
+                            hasContactIntent: windowPlatform
+                        )
+                    }
+                    let windowMail = joined.lowercased().contains("mail")
+                        || joined.lowercased().contains(" at ")
+                        || joined.contains("@")
                     assembled += Extractors.emails(
                         base: joinedViews.base,
                         separators: joinedViews.separators,
-                        hasMailKeyword: true,
+                        hasMailKeyword: windowMail,
                         effort: effort
                     )
+                    if assembled.isEmpty {
+                        assembled += Extractors.spelledEmails(in: joined, effort: effort)
+                        if assembled.isEmpty {
+                            assembled += Extractors.spelledURLs(in: joined, effort: effort)
+                        }
+                    }
                 }
 
                 if assembled.isEmpty {
@@ -500,7 +531,15 @@ final class ModerationEngine {
                         .filter { $0.count <= 8 && !$0.contains(" ") && $0.allSatisfy { $0.isLetter } }
                     if fragments.count >= 3 {
                         let glued = fragments.joined()
-                        if glued.count >= 8, signals.platformStrong || signals.platformWeak {
+                        let windowText = window.joined(separator: " ").lowercased()
+                        let windowPlatform = Lex.platformsStrong.contains { windowText.contains($0) }
+                            || windowText.contains("handle")
+                        let locatorContext = ["booking", "ref", "reference", "confirmation",
+                                              "pnr", "locator", "itinerary"]
+                            .contains { windowText.contains($0) }
+                        if glued.count >= 8, windowPlatform, !locatorContext,
+                           Lex.fuzzyPlatform(glued) == nil,
+                           !Lex.platformsStrong.contains(glued) {
                             assembled.append(Detection(
                                 category: .socialHandle,
                                 range: 0..<max(1, currentLength),
@@ -514,18 +553,30 @@ final class ModerationEngine {
                 }
 
                 if let first = assembled.first {
-                    crossMessage = true
-                    buffers.consume(actor: actor)
-                    detections.append(Detection(
-                        category: first.category,
-                        range: localRange(first.range, category: first.category),
-                        surface: "",
-                        canonical: first.canonical,
-                        confidence: max(first.confidence, 0.88),
-                        transforms: first.transforms + ["conversation-buffer"],
-                        effort: effort + 4,
-                        reason: "\(first.category.display) assembled across recent messages"
-                    ))
+                    let canon = first.canonical.lowercased()
+                    let bogusPlatform = Lex.platformsStrong.contains(canon)
+                        || Lex.platformsWeak.contains(canon)
+                    let windowText = window.joined(separator: " ").lowercased()
+                    let windowPlatform = Lex.platformsStrong.contains { windowText.contains($0) }
+                        || windowText.contains("handle")
+                    let locatorWithoutChannel = first.category == .socialHandle
+                        && Extractors.looksLikeBookingLocator(first.canonical)
+                        && !windowPlatform
+                    let isPositionalChannel = first.transforms.contains("positional-channel")
+                    if (!bogusPlatform || isPositionalChannel), !locatorWithoutChannel {
+                        crossMessage = true
+                        buffers.consume(actor: actor)
+                        detections.append(Detection(
+                            category: first.category,
+                            range: localRange(first.range, category: first.category),
+                            surface: "",
+                            canonical: first.canonical,
+                            confidence: max(first.confidence, 0.88),
+                            transforms: first.transforms + ["conversation-buffer"],
+                            effort: effort + 4,
+                            reason: "\(first.category.display) assembled across recent messages"
+                        ))
+                    }
                 }
             }
         }
@@ -585,16 +636,27 @@ final class ModerationEngine {
 
         let addressesPersonForClassifier = EscalationAnalyser.addressesPerson(views.alpha)
             || EscalationAnalyser.addressesPersonNativeScript(analysed)
-        let classification = deps.safetyClassifier.classify(SafetyClassifierInput(
+        let bargain = LeverTaxonomy.bargainSignals(in: analysed)
+        var classification = deps.safetyClassifier.classify(SafetyClassifierInput(
             text: analysed,
             deterministicFindings: safety.findings,
             safetySimilarity: safetySimilarity,
             innocentSimilarity: safetyInnocentSimilarity,
             addressesPerson: addressesPersonForClassifier,
             conditionalDemand: EscalationAnalyser.conditionalDemand(views.base.text)
-                || EscalationAnalyser.nativeConditionalDemand(analysed),
-            propertyDirected: Self.mentionsProperty(views.alpha)
+                || EscalationAnalyser.nativeConditionalDemand(analysed)
+                || bargain.isBargain,
+            propertyDirected: Self.mentionsProperty(views.alpha),
+            reviewBargainScore: bargain.coercionPrior
         ))
+        // Same prior on the remote path: OpenAI has no coercion head, so without this
+        // a paraphrase would never route.
+        if bargain.coercionPrior > 0 {
+            classification.raise(.coercion, to: bargain.coercionPrior)
+        }
+        if bargain.coercionPrior >= 0.55 {
+            classification.set(.legitimateComplaint, 0)
+        }
         let layer3 = deps.safetyClassifier.calibration.apply(
             classification, textLength: Array(analysed).count
         )
@@ -795,7 +857,9 @@ final class ModerationEngine {
             }
         }
 
-        let escalate = deps.abstainBand.contains(scoring.score) || !escalation.isEmpty
+        let escalateSuspicions = escalation.suspicions.filter { $0 != .personDirectedAnomaly }
+        let escalate = deps.abstainBand.contains(scoring.score)
+            || !escalateSuspicions.isEmpty
             || behaviouralSuspicion || learnedAbuseSignal
         if escalate { reasonCodes.append("TIER3_ESCALATION_CANDIDATE") }
 
@@ -922,10 +986,12 @@ final class ModerationEngine {
             // as `allow`. The router's flag is the only evidence there is at that point, so
             // discarding it is failing open on precisely the messages the deterministic tiers
             // could not read.
-            let safetyShaped = verdict.suspicions.contains(.personDirectedAnomaly)
+            let criticalSafety: Set<ModCategory> = [
+                .threat, .sexual, .selfHarm, .coercion, .discrimination,
+            ]
+            let safetyShaped = verdict.suspicions.contains(.learnedAbuse)
                 || verdict.suspicions.contains(.conditionalDemand)
-                || verdict.suspicions.contains(.learnedAbuse)
-                || verdict.categories.contains { !$0.isContactExfiltration && $0 != .systemManipulation }
+                || verdict.categories.contains { criticalSafety.contains($0) }
             guard safetyShaped, verdict.action == .allow || verdict.action == .hint else {
                 return verdict
             }
@@ -1032,8 +1098,9 @@ final class ModerationEngine {
 
         if judgement.decision == .benign {
             let hasHardEvidence = detections.contains {
-                $0.category.isContactExfiltration && $0.confidence >= 0.85
-                    && !$0.transforms.contains("semantic-retrieval")
+                ($0.category.isContactExfiltration && $0.confidence >= 0.85
+                    && !$0.transforms.contains("semantic-retrieval"))
+                || ($0.category == .coercion && $0.confidence >= 0.80)
             }
             guard !hasHardEvidence else { return verdict }
 

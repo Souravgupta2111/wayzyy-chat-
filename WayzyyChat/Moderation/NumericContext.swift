@@ -32,7 +32,12 @@ enum NumericContext {
         ("hsn", #"\b(?:hsn|sac)\D{0,6}\d{4,8}\b"#),
 
         ("flight", #"\b(?:flight|fl|pnr|train|bus|ticket|seat|gate|terminal)\D{0,8}[a-z0-9]{0,3}\s?\d{1,6}\b"#),
-        ("booking-ref", #"\b(?:booking|reservation|confirmation|conf|order|invoice|receipt|ref|reference|id)\W{0,4}(?:no\.?|number|code|id|#)?\W{0,4}[a-z0-9][a-z0-9\-]{3,20}\b"#),
+        ("booking-ref", #"\b(?:booking|reservation|confirmation|conf|order|invoice|receipt|ref|reference|id|pnr|locator|itinerary)\W{0,4}(?:no\.?|number|code|id|#)?\W{0,4}[a-z0-9][a-z0-9\-]{3,20}\b"#),
+        // Codes with no keyword: GPX-MT3AD9C8, WZ4471829, HT/2024/881 — mixed letters+digits,
+        // not a 10-digit phone.
+        ("mixed-ref", #"\b[a-z]{2,8}-[a-z0-9]{3,16}\b"#),
+        ("slash-ref", #"\b[a-z]{2,5}/\d{2,8}(?:/[a-z0-9]{2,8})?\b"#),
+        ("alnum-ref", #"\b[a-z]{2,5}\d{3,10}[a-z]{0,6}\d{0,6}\b"#),
 
         ("unit-no", #"\b(?:flat|apt|apartment|room|unit|block|floor|door|house|villa|plot|survey|shop|gate|tower|wing)\s*(?:no\.?|#)?\s*\d{1,5}\b"#),
         ("highway", #"\b(?:nh|sh|highway|route)\s*-?\s*\d{1,3}\b"#),

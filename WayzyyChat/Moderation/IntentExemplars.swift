@@ -279,6 +279,16 @@ enum IntentExemplars {
         .init("i can make your rating disappear for the right price", .reviewBlackmail),
         .init("send five thousand back or i come to your office and cause a scene", .reviewBlackmail),
         .init("do what i ask or i will write that the host is a fraud", .reviewBlackmail),
+        .init("waive the extra fee and the rating stays high", .reviewBlackmail),
+        .init("comp the night quietly and the stars stay as they are", .reviewBlackmail),
+        .init("you do not want this on a public review do you", .reviewBlackmail),
+        .init("paisa wapas karo warna rating kharab ho jayegi", .reviewBlackmail),
+        .init("paisa wapas karo nahi to rating kharab ho jayegi", .reviewBlackmail),
+        .init("refund the cleaning fee or this goes on my review", .reviewBlackmail),
+        .init("half back quietly and i still give five stars", .reviewBlackmail),
+        .init("you wouldnt want guests reading this would you", .reviewBlackmail),
+        .init("keep this between us or i will have to go public", .reviewBlackmail),
+        .init("sort it privately or i make this public", .reviewBlackmail),
     ]
 
     static let harassment: [Exemplar] = [
@@ -413,6 +423,9 @@ enum IntentExemplars {
         "please refund the cleaning fee, the villa was not cleaned before we arrived",
         "i have photos of the damage that was already there when we checked in",
         "i am asking for partial compensation for the two nights we could not sleep",
+        "refund me or i will report this to the police",
+        "give me a discount or i will raise a dispute with my bank",
+        "fix this or i will take it to wayzyy support",
         "the host is being completely unhelpful and i am frustrated",
         "i will dispute this charge with my bank if we cannot resolve it",
         "your caretaker was rude to my family and i want an apology",
@@ -461,6 +474,11 @@ enum IntentExemplars {
         "let me know if you need anything at all during your stay",
         "i replied to your question about the pool yesterday",
         "we had a lovely time, the sunsets from the terrace were unreal",
+        "we can settle the extra mattress charge between us",
+        "the pool is public so towels are extra",
+        "looking forward to hosting you and your family this weekend",
+        "please confirm booking reference WZ9K3LP2 when you arrive",
+        "i will escalate this to wayzyy support if we cannot resolve it",
         "can you confirm the checkout time for sunday please",
         "the taxi from the airport takes about an hour",
     ]

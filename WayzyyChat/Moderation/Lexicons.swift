@@ -549,12 +549,10 @@ enum Lex {
         "i will ruin your rating", "ill ruin your", "destroy your rating",
         "i will report you to", "one star review unless", "bad review unless",
         "give me a discount or", "refund me or", "cancel or i will",
-
-        "warna review kharab", "warna bura review", "warna main review",
-        "review kharab kar dunga", "review kharab kar denge",
-        "rating kharab kar dunga", "paisa wapas de warna", "paisa wapas kar warna",
-        "refund do warna", "nahi diya to review", "warna police",
-        "warna main sabko bata dunga", "warna tera business",
+        "or i will leave a", "or i'll leave a", "or i post",
+        "unless you refund", "warna review", "warna rating",
+        "nahi to review", "nahi toh review", "nahin to review",
+        "nhi to review", "nahi to rating",
     ]
 
     static let scamPhrases: [String] = [

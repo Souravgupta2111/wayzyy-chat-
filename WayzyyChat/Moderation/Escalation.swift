@@ -120,7 +120,10 @@ enum EscalationAnalyser {
                 result.suspicions.append(.personDirectedAnomaly)
             }
         }
-        if Self.conditionalDemand(views.base.text) || Self.nativeConditionalDemand(original) {
+        if Self.conditionalDemand(views.base.text)
+            || Self.nativeConditionalDemand(original)
+            || LeverTaxonomy.isReviewBargain(original)
+            || LeverTaxonomy.isReviewBargain(views.base.text) {
             result.suspicions.append(.conditionalDemand)
         }
 
@@ -437,7 +440,7 @@ enum EscalationAnalyser {
 
     private static let conditionalDemandRX = RX(
         "conditional-demand",
-        #"\b(?:or\s+(?:else|i|we|il+|i'?ll)|otherwise\s+i|unless\s+you|if\s+you\s+(?:do\s*n[o']?t|don'?t|refuse|won'?t)|warna|nahi\s+to|nahin\s+to|varna)\b"#
+        #"\b(?:or\s+(?:else|i|we|il+|i'?ll)|otherwise\s+i|unless\s+you|if\s+you\s+(?:do\s*n[o']?t|don'?t|refuse|won'?t)|warna|varna|nahi+n?\s+toh?|nhi+\s+toh?)\b"#
     )
 
     private static let conditionalReprisalRX = RX(

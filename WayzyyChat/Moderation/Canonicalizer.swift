@@ -115,7 +115,7 @@ struct Canonicalizer {
         "percent-decode", "digit-script-fold", "numeral-script-fold",
         "hidden-carrier-decode", "roman-numerals",
         "positional-channel", "protocol-establishment",
-        "separator-words",
+        "separator-words", "spelled-separators",
     ]
 
     static func effortWeight(_ transform: String) -> Int {
@@ -128,7 +128,7 @@ struct Canonicalizer {
         case "digit-script-fold", "numeral-script-fold":          return 4
         case "number-words", "nato-letters", "conversation-buffer": return 3
         case "compat-fold", "roman-numerals":                      return 3
-        case "separator-words":                                    return 2
+        case "separator-words", "spelled-separators":              return 3
         case "repeat-collapse":                                    return 1
         default:                                                   return 0
         }
@@ -725,19 +725,32 @@ struct Canonicalizer {
                 k += dir
             }
             guard k >= 0, k < tokens.count, tokens[k].isWord else { return false }
-            return tokens[k].text.count >= 2
+            let t = tokens[k].text
+            guard let first = t.first, first.isLetter || first.isNumber else { return false }
+            return t.count >= 1
         }
 
+        var skipNextWhitespace = false
         for (idx, token) in tokens.enumerated() {
+            if skipNextWhitespace, token.text.allSatisfy(\.isWhitespace) {
+                skipNextWhitespace = false
+                continue
+            }
+            skipNextWhitespace = false
             if token.isWord,
                let symbol = Lex.separatorWords[token.text],
                wordNeighbour(idx, -1), wordNeighbour(idx, +1) {
                 changed = true
+                while outChars.last?.isWhitespace == true {
+                    outChars.removeLast()
+                    outOffsets.removeLast()
+                }
                 let origin = view.offsets[token.start]
                 for rc in symbol {
                     outChars.append(rc)
                     outOffsets.append(origin)
                 }
+                skipNextWhitespace = true
             } else {
                 for k in token.start..<token.end {
                     outChars.append(view.chars[k])

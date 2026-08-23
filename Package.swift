@@ -21,6 +21,7 @@ let package = Package(
         .executable(name: "wayzyy-moderate", targets: ["ModerationService"]),
         .executable(name: "wayzyy-moderate-http", targets: ["ModerationHTTP"]),
         .executable(name: "wayzyy-invariants", targets: ["InvariantChecks"]),
+        .executable(name: "CoconutTest", targets: ["CoconutTest"]),
     ],
     targets: [
         .target(
@@ -46,6 +47,11 @@ let package = Package(
             name: "InvariantChecks",
             dependencies: ["WayzyyModeration"],
             path: "Sources/InvariantChecks"
+        ),
+        .executableTarget(
+            name: "CoconutTest",
+            dependencies: ["WayzyyModeration"],
+            path: "Sources/CoconutTest"
         ),
     ]
 )
