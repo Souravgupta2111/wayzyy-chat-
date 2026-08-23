@@ -1,36 +1,18 @@
-// The public service contract.
-//
-// Everything else in this module is internal on purpose. A service boundary should expose a
-// deliberate, versioned contract rather than the engine's internals — otherwise the wire
-// format drifts with every refactor and consumers couple to details they should not see.
-//
-// This is also the seam that makes the engine portable: any transport (HTTP, gRPC, queue
-// consumer, Lambda) only needs these two DTOs and one function.
 
 import Foundation
 
-// MARK: - Request
 
+    // Unique identifier for tracking this request through the moderation pipeline
 public struct ModerationRequestDTO: Codable, Sendable {
     public var id: String?
-    /// `nil` or `"evaluate"` to judge a message; `"health"` for a liveness probe.
     public var op: String?
     public var text: String?
     public var conversationID: String?
     public var senderID: String?
-    /// Set by the platform backend from account data, never by the phone.
-    /// A patched client sending `trusted` cannot loosen policy: elevated senders are clamped.
-    /// Prefer `POST /v1/context` so replicas share the same trust. `fresh` | `standard` | `trusted`.
-    /// Aliases: `new` → fresh, `established` → trusted.
     public var trust: String?
-    /// Set by the platform via `POST /v1/context`, never by the phone.
-    /// Ignored on `/v1/moderate` so a patched client cannot pick `checkedIn`.
-    /// `inquiry` | `booked` | `checkedIn`. Aliases: `staying` / `completed` → checkedIn.
+    // Captures the lifecycle stage of the booking to adjust policy strictness dynamically
     public var stage: String?
-    /// Set by the platform backend. The engine takes max(this, stored reports+blocks)
-    /// so a client cannot reset the counter to zero.
     public var priorViolations: Int?
-    /// Typing-hint mode. Advisory verdicts are clamped and can never enforce.
     public var advisory: Bool?
 
     public init(
@@ -46,13 +28,9 @@ public struct ModerationRequestDTO: Codable, Sendable {
     }
 }
 
-// MARK: - Recipient signal
 
-/// A recipient reporting or blocking a sender. Separate from `ModerationRequestDTO` because
-/// it carries no message and produces no verdict — it is evidence, not a judgement.
 public struct RecipientSignalDTO: Codable, Sendable {
     public var id: String?
-    /// `report` or `block`.
     public var op: String
     public var senderID: String
     public var conversationID: String?
@@ -66,6 +44,7 @@ public struct RecipientSignalDTO: Codable, Sendable {
 public struct ConversationContextDTO: Codable, Sendable {
     public var op: String?
     public var conversationID: String
+    // Captures the lifecycle stage of the booking to adjust policy strictness dynamically
     public var stage: String?
     public var trust: String?
     public var priorViolations: Int?
@@ -83,6 +62,7 @@ public struct ConversationContextDTO: Codable, Sendable {
 public struct ConversationContextAckDTO: Codable, Sendable {
     public var ok: Bool
     public var conversationID: String?
+    // Captures the lifecycle stage of the booking to adjust policy strictness dynamically
     public var stage: String?
     public var trust: String?
     public var priorViolations: Int?
@@ -94,7 +74,6 @@ public struct RecipientSignalAckDTO: Codable, Sendable {
     public var ok: Bool
     public var op: String?
     public var senderID: String?
-    /// Counters after the signal was applied, so callers can see it landed.
     public var receivedReports: Int?
     public var blockEvents: Int?
     public var compositeRisk: Double?
@@ -106,12 +85,10 @@ public struct RecipientSignalAckDTO: Codable, Sendable {
     }
 }
 
-// MARK: - Response
 
 public struct ModerationVerdictDTO: Codable, Sendable {
     public var id: String?
     public var ok: Bool
-    /// `allow`, `hint`, `mask`, `warn`, `review`, `block`.
     public var action: String?
     public var score: Double?
     public var categories: [String]?
@@ -121,13 +98,9 @@ public struct ModerationVerdictDTO: Codable, Sendable {
     public var latencyMs: Double?
     public var policyVersion: String?
     public var provisionalHold: Bool?
-    /// True when the message would be sent to Tier 3 for adjudication.
     public var escalationCandidate: Bool?
-    /// True when this response is the previously stored decision for a repeated request id,
-    /// rather than a fresh evaluation. A retry must not be able to change an outcome.
     public var idempotentReplay: Bool?
     public var error: String?
-    /// Chat UI only: action to apply and text to show. Never send `categories` / `reasonCodes` to the other party.
     public var displayAction: String?
     public var displayText: String?
 
@@ -136,43 +109,24 @@ public struct ModerationVerdictDTO: Codable, Sendable {
     }
 }
 
-// MARK: - Limits
-//
-// A service needs bounds the app never did. A 29,400-character input measured 169 ms
-// on-device: tolerable for one user, unacceptable when it occupies a shared worker.
 
 public enum ModerationLimits {
     public static let maxTextBytes = 8_192
     public static let maxRequestBytes = 32_768
 }
 
-// MARK: - Facade
 
 public enum WayzyyModerationService {
 
     public static var policyVersion: String { Policy.current.version }
 
-    /// Whether a real Tier 3 adjudicator is reachable. Exposed for health reporting and so
-    /// the fail-closed guarantee can be asserted rather than assumed.
     public static var tier3Available: Bool { ModerationEngine.shared.tier3Available }
 
-    // MARK: - Deployment seams
-    //
-    // The two pieces of state that cannot stay in-process once there is more than one replica,
-    // and the one signal that has to come from outside because it changes hourly.
 
-    /// Move actor signals to a shared store. Without this, each replica sees only its own share
-    /// of a sender's 24-hour history, which multiplies every escalation threshold by the replica
-    /// count and hides a recipient's report from the next pod that sender reaches.
     public static func installActorSignalBackend(_ backend: ActorSignalBackend) {
         ModerationEngine.shared.actorSignals = ActorSignalStore(backend: backend)
     }
 
-    /// Move conversation buffers to a shared store.
-    ///
-    /// More urgent than the actor store behind a load balancer: these buffers exist to catch
-    /// attacks split across messages, so per-replica buffers lose exactly the attacks they were
-    /// added for. Four drip-fed fragments across four pods leave no pod holding more than one.
     public static func installConversationBufferBackend(_ backend: ConversationBufferBackend) {
         ModerationEngine.shared.buffers = ConversationBuffers(backend: backend)
     }
@@ -181,60 +135,36 @@ public enum WayzyyModerationService {
         contextStore = ConversationContextStore(backend: backend)
     }
 
-    /// Install a host reputation source. Reputation may raise suspicion and never lower it, so
-    /// this cannot be used to switch off contact-exfiltration rules.
     public static func installURLReputationProvider(_ provider: URLReputationProvider) {
         URLReputation.provider = provider
     }
 
-    /// Hosts this deployment treats as its own — the only de-escalation path, and deliberately
-    /// operator-owned rather than vendor-owned.
     public static var urlAllowlist: Set<String> {
         get { URLReputation.allowlistedHosts }
         set { URLReputation.allowlistedHosts = newValue }
     }
 
-    /// The learned router, when weights were found. Exposed so a deployment can confirm the
-    /// model actually loaded — a missing file degrades silently to the previous behaviour, which
-    /// is the right default and the wrong thing to discover by accident.
     public static var abuseRouterDiagnostics: AbuseRouter? {
         ModerationEngine.shared.abuseRouter
     }
 
-    /// Whether the safety phrase lists are final. They are read without synchronisation on
-    /// every evaluation, so a deployment should confirm this before accepting traffic.
     public static var lexiconsSealed: Bool {
         _ = ModerationEngine.shared   // sealing happens in the shared initialiser
         return Lex.isSealed
     }
 
-    /// Size of the active slur set. An empty set silently disables the highest-confidence
-    /// rule in the engine, so it is worth asserting rather than assuming.
     public static var slurTermCount: Int { SlurLexicon.termCount }
 
-    /// Read-only behavioural risk lookup. Unlike `handle(_ signal:)` this records nothing, so
-    /// it is safe for health endpoints and for asserting that other operations are inert.
     public static func compositeRisk(senderID: String, conversationID: String = "svc") -> Double {
         ModerationEngine.shared
             .behaviouralRisk(sender: senderID, conversation: conversationID).composite
     }
 
-    // MARK: - Durable decisions
-    //
-    // A verdict is a historical fact, not a recomputable opinion. Callers persist the record
-    // and restore it; they must never re-run the engine to recover a past decision, because
-    // that re-decides under today's policy instead of the one that applied.
 
-    /// Evaluate and return a durable record of the decision, suitable for storage.
     public static func decisionRecord(for request: ModerationRequestDTO) -> DecisionRecord {
         evaluated(request).verdict.decisionRecord
     }
 
-    /// One evaluation, with the pieces callers need afterwards.
-    ///
-    /// Adjudication needs the verdict, the message and the actor — not just the record — so a
-    /// single entry point produces all three. Re-deriving them later would mean evaluating
-    /// twice and risking two different answers for one message.
     static func evaluated(_ request: ModerationRequestDTO,
                           persistBuffer: Bool = true)
         -> (verdict: Verdict, actor: ActorContext, text: String) {
@@ -251,8 +181,6 @@ public enum WayzyyModerationService {
         return (verdict, actor, text)
     }
 
-    /// Restore a stored decision and re-capture it. Round-tripping is the identity function on
-    /// every enforcement-relevant field, which is what makes a stored decision trustworthy.
     public static func roundTrip(_ record: DecisionRecord) -> DecisionRecord {
         var restored = Verdict(restoring: record).decisionRecord
         restored.decidedAt = record.decidedAt   // re-capture stamps 'now'; the fact is the original
@@ -260,19 +188,7 @@ public enum WayzyyModerationService {
         return restored
     }
 
-    // MARK: - Dependency probes
-    //
-    // Layer 3 sits on the synchronous write path, so the cost of a *failed* dependency is a
-    // property worth measuring rather than assuming. These exist so readiness checks and the
-    // invariant gate can assert the write path stays fast when the classifier endpoint is
-    // unreachable, instead of discovering it under load.
 
-    /// Worst-case synchronous latency of a full evaluation while the remote classifier
-    /// endpoint is unreachable, in milliseconds.
-    ///
-    /// Installs a classifier pointed at a black-hole port, measures, then restores the
-    /// previous classifier. The result should be far below `timeout`, because a cache miss
-    /// returns local scores immediately and refreshes in the background.
     public static func probeUnreachableClassifierLatencyMs(samples: Int = 25,
                                                            timeout: TimeInterval = 2.0) -> Double {
         let engine = ModerationEngine.shared
@@ -293,29 +209,15 @@ public enum WayzyyModerationService {
         return worst
     }
 
-    /// Whether the classifier that serves cache misses and outages may enforce.
-    /// Always false by construction; exposed so that can be asserted.
     public static var degradedClassifierCanEnforce: Bool {
         RemoteSafetyClassifier(configuration: .local()).fallbackCanEnforce
     }
 
-    // MARK: - Policy rollout
-    //
-    // A service needs to change thresholds and action tables without a redeploy, and needs
-    // to be able to roll back. Configuration is a value type and every evaluation takes one
-    // immutable snapshot at request entry, so a rollout applied here can never tear a
-    // verdict in flight: an evaluation already running completes against the version it
-    // started with.
 
-    /// Serialise the active policy, for audit or rollback.
     public static func exportPolicy() throws -> Data {
         try Policy.snapshot().encoded()
     }
 
-    /// Install a policy configuration. Returns the version now active.
-    ///
-    /// Rejects a configuration that would violate an invariant, because a policy file is
-    /// exactly the vector by which someone could otherwise make self-harm blockable.
     @discardableResult
     public static func loadPolicy(json: Data) throws -> String {
         let candidate = try Policy.Configuration.decoded(from: json)
@@ -345,11 +247,6 @@ public enum WayzyyModerationService {
         }
     }
 
-    /// Apply a recipient signal — a report or a block.
-    ///
-    /// Returns the resulting counters so a caller can confirm the signal landed rather than
-    /// assuming it did. These signals do not produce a verdict and cannot enforce on their
-    /// own: they raise the evidence available to the next evaluation.
     public static func handle(_ signal: RecipientSignalDTO) -> RecipientSignalAckDTO {
         let engine = ModerationEngine.shared
         guard !signal.senderID.isEmpty else {
@@ -383,7 +280,6 @@ public enum WayzyyModerationService {
         return ack
     }
 
-    /// Booking stage (and optional trust/priors) from the platform's booking/user tables.
     public static func handle(_ context: ConversationContextDTO) -> ConversationContextAckDTO {
         let id = context.conversationID.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !id.isEmpty, id != "svc" else {
@@ -405,9 +301,6 @@ public enum WayzyyModerationService {
         )
     }
 
-    /// Stateless with respect to the caller: every field the verdict depends on arrives in
-    /// the request. Conversation and actor state are keyed by the supplied identifiers, so
-    /// the same request always produces the same verdict for the same state.
     public static func handle(_ request: ModerationRequestDTO) -> ModerationVerdictDTO {
         if request.op == "health" {
             var out = ModerationVerdictDTO(id: request.id, ok: true)
@@ -455,23 +348,7 @@ public enum WayzyyModerationService {
     }
 }
 
-// MARK: - Startup
-//
-// Everything in this file above this point assumes the process has been wired up. This is the
-// wiring, and it exists because the default configuration is safe for a test and wrong for a
-// deployment.
-//
-// The specific hazard: with no adjudicator installed, `tier3Available` is false, and the
-// fail-closed rule raises safety-shaped content in the critical categories to `review` rather
-// than delivering it. That is the correct choice for a single message and a disaster as a
-// steady state, because `review` is a hold and there is no human review tier to drain it. A pod
-// that starts without an adjudicator does not fail loudly; it quietly converts a fraction of
-// real traffic into messages nobody will ever see.
-//
-// So startup is explicit, it reports exactly what it wired, and it can be told to refuse to
-// start rather than serve in that condition.
 
-/// What the process wired up, for logging and for a readiness check.
 public struct BootstrapReport: Codable, Equatable {
     public var adjudicator: String
     public var tier3Available: Bool
@@ -513,17 +390,6 @@ public enum BootstrapError: Error, CustomStringConvertible {
 
 extension WayzyyModerationService {
 
-    /// Wire the process from the environment and report what was installed.
-    ///
-    /// Recognised variables:
-    ///
-    /// * `WAYZYY_JUDGE_BASE_URL`, `WAYZYY_JUDGE_MODEL`, `WAYZYY_JUDGE_KEY` — any
-    ///   OpenAI-compatible endpoint. Checked first, so a deployment can point at a sidecar or a
-    ///   self-hosted model without code changes.
-    /// * `WAYZYY_TIER3` — `auto` (default), `local`, `pooled`, or `off`.
-    /// * `WAYZYY_REQUIRE_TIER3` — when set, startup throws instead of serving without an
-    ///   adjudicator.
-    /// * `WAYZYY_KEYS`, `WAYZYY_SECRETS_FILE` — provider credentials.
     @discardableResult
     public static func bootstrap() throws -> BootstrapReport {
         let env = ProcessInfo.processInfo.environment
@@ -561,14 +427,9 @@ extension WayzyyModerationService {
             throw BootstrapError.adjudicatorRequired(notes.joined(separator: " "))
         }
         if !available, mode != "off" {
-            // Not fatal by default — a single-tenant or staging deployment may genuinely want
-            // this — but it must never be silent.
             notes.append("Running without adjudication: critical-category routing will hold for review.")
         }
 
-        // Deployment seams: shared actor signals and conversation buffers.
-        // Without these, each replica holds its own state; behavioural history fragments
-        // across pods and cross-message detection stops working.
         if let redisURL = env["REDIS_URL"], !redisURL.isEmpty {
             do {
                 let actorBackend = try RedisActorSignalBackend(redisURL: redisURL)
@@ -598,9 +459,6 @@ extension WayzyyModerationService {
             notes.append("No abuse router weights; unlisted abuse relies on structural signals alone.")
         }
 
-        // Optional secondary routing signal. Opt-in, because it sends message text to a third
-        // party — a decision an operator should make explicitly rather than inherit from a
-        // default. It cannot enforce, so losing it costs routing recall and nothing else.
         if let key = env["WAYZYY_OPENAI_MODERATION_KEY"] ?? SecretsStore.key("openai"),
            !key.isEmpty,
            env["WAYZYY_OPENAI_MODERATION"] != nil {
@@ -611,9 +469,6 @@ extension WayzyyModerationService {
             notes.append("OpenAI moderation installed as a routing-only secondary signal.")
         }
 
-        // Durable decisions. Postgres wins when both are configured: the file log is a
-        // single-writer store and cannot survive a rolling deploy with 2+ replicas. The
-        // Dockerfile still sets WAYZYY_DECISION_LOG as a local fallback for single-node runs.
         if let pgConfig = PostgresDecisionStore.Configuration.fromEnvironment() {
             let store = PostgresDecisionStore(configuration: pgConfig)
             installDecisionStore(store)
@@ -656,7 +511,6 @@ extension WayzyyModerationService {
     }
 }
 
-// MARK: - Durable decisions and the outbox
 
 extension WayzyyModerationService {
 
@@ -665,8 +519,6 @@ extension WayzyyModerationService {
     private static let contextLock = NSLock()
     private static var _contextStore = ConversationContextStore()
 
-    /// Where decisions are written. Defaults to memory, which is right for the app and for
-    /// tests and wrong for a deployment — so startup reports which one is installed.
     public static var decisionStore: DecisionStore {
         get { storeLock.lock(); defer { storeLock.unlock() }; return _decisionStore }
         set { storeLock.lock(); _decisionStore = newValue; storeLock.unlock() }
@@ -681,15 +533,8 @@ extension WayzyyModerationService {
         decisionStore = store
     }
 
-    /// Number of decisions the active store holds. For readiness reporting.
     public static var committedDecisionCount: Int { decisionStore.committedDecisions }
 
-    /// Evaluate and persist, returning the stored decision unchanged on a retry.
-    ///
-    /// A client that retries after a timeout must get the decision that was already made. Any
-    /// other behaviour means a retry can change an outcome, which turns a network hiccup into
-    /// an enforcement difference and makes the audit trail ambiguous about which verdict
-    /// actually applied to the message.
     private static let idempotencyLocks = KeyedLock()
 
     public static func handleDurably(_ request: ModerationRequestDTO) throws -> ModerationVerdictDTO {
@@ -784,30 +629,12 @@ extension WayzyyModerationService {
         return nil
     }
 
-    /// Feed the conversation buffer.
-    ///
-    /// Without this, cross-message detection cannot work at all through the service: the
-    /// assembly logic reads a window of previous messages and nothing else on this path writes
-    /// to it. Three exclusions, each for a different reason:
-    ///
-    /// * **Advisory calls.** A preview of a message that has not been sent. Buffering it would
-    ///   let a sender assemble an attack out of drafts they never delivered.
-    /// * **Withheld messages.** Never reached the recipient, so the exfiltration did not
-    ///   progress. Keeping the fragment would also let a blocked message contribute to
-    ///   actioning a later innocent one.
-    /// * **Requests with no conversation identity.** The buffer is keyed by conversation and
-    ///   sender. A caller that omits both would share one buffer with every other such caller,
-    ///   so fragments from unrelated people would assemble into evidence nobody produced —
-    ///   the one thing cross-message detection must never do.
     static func hasIdentity(_ request: ModerationRequestDTO) -> Bool {
         let convo = request.conversationID?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         let sender = request.senderID?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         return !convo.isEmpty && !sender.isEmpty && convo != "svc" && sender != "svc"
     }
 
-    /// Trust and prior-violation fields on the request are hints from the platform backend,
-    /// never from a phone. Stage is taken only from `POST /v1/context` (booking row), defaulting
-    /// to `inquiry`. Priors are max(request, stored reports+blocks, replicated platform floor).
     static func actorContext(from request: ModerationRequestDTO) -> ActorContext {
         let sender = request.senderID?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         let convo = request.conversationID?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
@@ -849,8 +676,6 @@ extension WayzyyModerationService {
         engine.remember(text, actor: actor)
     }
 
-    /// Render a stored decision as a response. Pure translation — no policy read, no
-    /// re-evaluation — so a replayed decision is the original one, not today's opinion of it.
     static func verdictDTO(restoring record: DecisionRecord) -> ModerationVerdictDTO {
         var out = ModerationVerdictDTO(ok: true)
         out.action = record.action
@@ -866,8 +691,6 @@ extension WayzyyModerationService {
         return out
     }
 
-    /// The only fields a chat client should render. Categories and reason codes stay on the
-    /// backend so the other party never learns *why* a span was removed.
     static func attachDisplay(_ out: inout ModerationVerdictDTO) {
         out.displayAction = out.action
         switch out.action {
@@ -881,20 +704,11 @@ extension WayzyyModerationService {
     }
 
     static func recordSignal(kind: OutboxEvent.Kind, senderID: String, id: String?) {
-        // A report or block has already been applied in memory by the time this runs; the
-        // event is what makes it survive a restart. Failing to record it must not discard the
-        // signal, because the recipient's evidence is more valuable than the log line.
         try? decisionStore.commit(event: OutboxEvent(
             requestID: id ?? UUID().uuidString, kind: kind, subject: senderID))
         OutboxDispatcher.shared.kick()
     }
 
-    /// Rebuild behavioural state from the event log after a restart.
-    ///
-    /// Reports and blocks are the only label source in a design with no human review tier, so
-    /// losing them on every deploy would reset every repeat offender to a clean slate. The
-    /// window matches the actor store's own retention: older evidence has already expired and
-    /// replaying it would resurrect signals the policy considers stale.
     @discardableResult
     public static func replayRecipientSignals(window: TimeInterval = 24 * 3600) -> Int {
         let engine = ModerationEngine.shared
@@ -909,8 +723,6 @@ extension WayzyyModerationService {
                 engine.block(sender: event.subject, at: event.occurredAt)
                 replayed += 1
             case .decision, .adjudication:
-                // Decisions and their revisions are facts about messages, not behavioural
-                // signals. Replaying them would re-derive risk the signals already carry.
                 continue
             }
         }
@@ -918,57 +730,13 @@ extension WayzyyModerationService {
     }
 }
 
-// MARK: - Asynchronous Tier 3 adjudication
-//
-// The gap this closes
-// ───────────────────
-// Tiers 1 and 2 recognise abuse they have seen the shape of before: listed phrases, and text
-// close enough to a labelled exemplar. Neither generalises to an insult invented this morning.
-// What they *do* produce for such a message is a suspicion — `personDirectedAnomaly` on
-// second-person degradation aimed at a person rather than a property — and a routing score.
-// That is the system saying "something is wrong here and I cannot name it".
-//
-// Answering that question needs something that reads meaning, which is Tier 3. Without this
-// file the service marked those messages as escalation candidates and then dropped them: the
-// adjudicator was reachable and never asked.
-//
-// Why asynchronous
-// ────────────────
-// A judgement costs roughly a second. Putting that on the send path would gate ordinary
-// conversation — "what time is check-in?" behind a one-second model call — which is the exact
-// cost this architecture exists to avoid. So the deterministic verdict is returned immediately
-// and the adjudication follows, arriving as an outbox event the platform acts on. For the
-// critical categories the provisional-hold path already withholds the message first, so those
-// are judged before anyone reads them; everything else is judged after delivery, which is the
-// honest trade for keeping chat fast.
-//
-// Three properties this deliberately preserves
-// ────────────────────────────────────────────
-// **The adjudicator cannot exceed policy.** A safety finding it produces is fed back through
-// `Policy.decide` rather than applied directly, so every category ceiling still holds: it can
-// raise harassment to a warning, and it cannot make harassment blockable or self-harm
-// enforceable no matter how confident it is.
-//
-// **History is appended, never rewritten.** The revision is stored as its own record beside
-// the original, and the original remains what `decision(forRequestID:)` returns. A retry
-// therefore still gets the decision that actually applied to the message when it was sent —
-// a later judgement is new information, not a retroactive edit of what happened.
-//
-// **Overload degrades to silence, not to a queue.** Beyond a fixed number of in-flight
-// judgements, adjudication is skipped and counted. The message already has a valid
-// deterministic verdict; adjudication improves it. An unbounded queue under load would trade a
-// bounded quality loss for an unbounded memory one.
 
 import Foundation
 
-/// The outcome of judging an already-delivered message.
 public struct AdjudicationOutcome: Codable, Equatable {
     public var requestID: String
-    /// What was returned to the caller at send time.
     public var priorAction: String
-    /// What the adjudicator, constrained by policy, concluded.
     public var action: String
-    /// True when the action changed — the only case the platform must act on.
     public var changed: Bool
     public var judgement: String
     public var confidence: Double
@@ -979,7 +747,6 @@ public struct AdjudicationOutcome: Codable, Equatable {
 
 extension WayzyyModerationService {
 
-    /// Suffix distinguishing a revision from the original in the same log.
     static let adjudicationSuffix = "#t3"
 
     private static let adjudicationLock = NSLock()
@@ -990,15 +757,11 @@ extension WayzyyModerationService {
     private static var _enabled = true
     private static let group = DispatchGroup()
 
-    /// Ceiling on concurrent judgements. Excess work waits in `pendingAdjudicationLimit`
-    /// rather than being dropped.
     public static var maxConcurrentAdjudications = 3
     public static var pendingAdjudicationLimit = 2_048
 
     private static var _pending: [(requestID: String, text: String, actor: ActorContext, verdict: Verdict)] = []
 
-    /// Turn adjudication off without removing the adjudicator — useful for load testing the
-    /// deterministic path in isolation.
     public static var adjudicationEnabled: Bool {
         get { adjudicationLock.lock(); defer { adjudicationLock.unlock() }; return _enabled }
         set { adjudicationLock.lock(); _enabled = newValue; adjudicationLock.unlock() }
@@ -1007,9 +770,7 @@ extension WayzyyModerationService {
     public struct AdjudicationStats: Codable, Equatable {
         public var inFlight: Int
         public var completed: Int
-        /// Judgements that changed the action. These are the ones that mattered.
         public var changed: Int
-        /// Skipped only when the pending queue is saturated.
         public var dropped: Int
     }
 
@@ -1020,10 +781,6 @@ extension WayzyyModerationService {
                                  changed: _changed, dropped: _dropped)
     }
 
-    // Counter mutation lives in synchronous helpers rather than inline in the task. Taking a
-    // lock directly inside an async function is unsound — the continuation can resume on a
-    // different thread than the one holding it — and is an error under the Swift 6 language
-    // mode. A synchronous call cannot suspend, so it cannot be split across threads.
 
     private static func dequeueAdjudication() -> (String, String, ActorContext, Verdict)? {
         adjudicationLock.lock()
@@ -1058,11 +815,8 @@ extension WayzyyModerationService {
         adjudicationLock.unlock()
     }
 
-    /// Schedule a judgement for a message that has already been answered.
-    ///
-    /// Returns true when the job was accepted (running or queued). False only when the
-    /// adjudicator is off or the pending queue is saturated.
     @discardableResult
+    // Queues escalated verdicts for asynchronous re-evaluation by the Tier 3 LLM adjudicator
     static func scheduleAdjudication(requestID: String,
                                      text: String,
                                      actor: ActorContext,
@@ -1089,6 +843,7 @@ extension WayzyyModerationService {
                     pumpAdjudications()
                 }
 
+                    // Executes the LLM call to get a second opinion on structurally suspicious messages
                 guard let (revised, judgement) = await engine.escalate(
                     verdict: job.3, message: job.1, actor: job.2
                 ) else { return }
@@ -1107,6 +862,7 @@ extension WayzyyModerationService {
 
                 recordAdjudicationCompleted(changed: outcome.changed)
 
+                // Persists the final adjudicated decision envelope to the backing store for later auditing
                 try? store.commit(
                     DecisionEnvelope(
                         requestID: job.0 + adjudicationSuffix,
@@ -1125,18 +881,6 @@ extension WayzyyModerationService {
         }
     }
 
-    /// Apply a synthetic judgement to a message and return the resulting action.
-    ///
-    /// The adjudicator is the newest thing in the system with any influence over enforcement,
-    /// and it is the only component whose behaviour this codebase does not control — it is a
-    /// third-party model reading free text. So "can a confident adjudicator exceed a category
-    /// ceiling?" needs to be answerable by assertion rather than by reading `revise` and
-    /// concluding that it probably cannot. This exists so a deployment can verify it directly,
-    /// with no network and no model.
-    ///
-    /// - Parameters:
-    ///   - category: the safety category the adjudicator claims, as a raw value.
-    ///   - confidence: deliberately unclamped, so a caller can try 1.0 and beyond.
     public static func simulateAdjudication(text: String,
                                             category: String,
                                             confidence: Double = 1.0,
@@ -1145,7 +889,6 @@ extension WayzyyModerationService {
                                    confidence: confidence, decision: decision).action
     }
 
-    /// As `simulateAdjudication`, returning the whole record so its attribution can be checked.
     public static func simulateAdjudicationRecord(text: String,
                                                   category: String,
                                                   confidence: Double = 1.0,
@@ -1166,14 +909,11 @@ extension WayzyyModerationService {
             .decisionRecord
     }
 
-    /// Wait for in-flight judgements to finish. For shutdown and for tests; a request path
-    /// must never call this, since waiting is the thing asynchronous adjudication avoids.
     @discardableResult
     public static func drainAdjudications(timeout: TimeInterval = 30) -> Bool {
         group.wait(timeout: .now() + timeout) == .success
     }
 
-    /// The adjudication of a request, if one has been recorded.
     public static func adjudication(forRequestID requestID: String) -> ModerationVerdictDTO? {
         guard let envelope = decisionStore
             .decision(forRequestID: requestID + adjudicationSuffix) else { return nil }
@@ -1182,16 +922,11 @@ extension WayzyyModerationService {
         return out
     }
 
-    /// Everything known about a request: the decision that applied when the message was sent,
-    /// and the later judgement if there is one. Separate fields rather than one merged verdict,
-    /// because a caller needs to know which of the two it is looking at.
     public struct DecisionStatusDTO: Codable {
         public var id: String
         public var ok: Bool
         public var found: Bool
-        /// Persist / show this in chat. No categories or reason codes.
         public var display: ClientDisplayDTO?
-        /// Backend-only. Do not forward to either chat participant.
         public var audit: ModerationVerdictDTO?
         public var adjudication: ModerationVerdictDTO?
         public var superseded: Bool

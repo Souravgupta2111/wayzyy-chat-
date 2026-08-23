@@ -1,20 +1,3 @@
-// Wayzyy moderation — HTTP front end.
-//
-// The engine is reached only through the public `WayzyyModerationService` facade, so this file
-// contains no moderation logic: it is transport, authentication, admission control and
-// observability. Swapping to gRPC or a queue consumer means replacing this file and nothing else.
-//
-//   POST /v1/moderate   evaluate a message, durably
-//   POST /v1/signal     record a recipient report or block
-//   POST /v1/context    booking stage / trust / priors from the platform DB
-//   GET  /health        liveness — is the process up
-//   GET  /ready         readiness — is it configured well enough to serve
-//   GET  /metrics       Prometheus text
-//
-// Liveness and readiness are separate on purpose. Liveness answers "should this container be
-// restarted", and restarting is the wrong response to a missing adjudicator — the replacement
-// would come up equally misconfigured. Readiness answers "should traffic be sent here", and that
-// is the correct lever for a pod that started but cannot do its job properly.
 
 import Foundation
 import WayzyyModeration
@@ -32,7 +15,6 @@ func intEnv(_ name: String, default fallback: Int) -> Int {
     return value
 }
 
-// MARK: - Startup
 
 let report: BootstrapReport
 do {
@@ -42,11 +24,6 @@ do {
     exit(78)   // EX_CONFIG
 }
 
-// Authentication is required unless explicitly waived. A moderation endpoint reachable without a
-// credential is not merely an information leak: `POST /v1/signal` lets a caller manufacture
-// reports and blocks against any sender, which is the highest-precision evidence the engine has.
-// An attacker who can forge those can drive an innocent sender towards enforcement. So the
-// default is to refuse to start, and running open has to be a decision someone typed.
 let apiTokens: Set<String> = {
     let raw = env["WAYZYY_API_TOKEN"] ?? ""
     return Set(raw.split(whereSeparator: { $0 == "," || $0 == " " }).map(String.init))
@@ -75,10 +52,7 @@ let encoder = JSONEncoder()
 encoder.outputFormatting = [.sortedKeys]
 let decoder = JSONDecoder()
 
-// MARK: - Helpers
 
-/// Compare in constant time. A token check that returns early on the first wrong byte leaks the
-/// token's prefix through timing, which is a slow but real way to guess it.
 func constantTimeEqual(_ a: String, _ b: String) -> Bool {
     let x = Array(a.utf8), y = Array(b.utf8)
     guard x.count == y.count else { return false }
@@ -94,8 +68,6 @@ func authenticate(_ request: HTTPRequest) -> String? {
         ? String(header.dropFirst("Bearer ".count))
         : header
     for token in apiTokens where constantTimeEqual(token, presented) {
-        // Identify the caller by a short fingerprint, never by the token itself: the rate
-        // limiter key and the log line both end up somewhere a token should not.
         return "t-\(token.prefix(4))\(token.count)"
     }
     return nil
@@ -121,7 +93,6 @@ func encodeJSON<T: Encodable>(_ value: T, status: Int = 200) -> HTTPResponse {
     return .json(status, data)
 }
 
-// MARK: - Routes
 
 func route(_ request: HTTPRequest) -> HTTPResponse {
     let started = DispatchTime.now().uptimeNanoseconds
@@ -131,16 +102,11 @@ func route(_ request: HTTPRequest) -> HTTPResponse {
         Metrics.shared.recordRequest(status: status, latencyMs: elapsed)
     }
 
-    // Unauthenticated endpoints. Neither reveals anything about a conversation, and a probe
-    // that requires a credential is a probe that fails during exactly the incident it exists
-    // to report on.
     switch (request.method, request.path) {
     case ("GET", "/health"):
         return .json(200, Data(#"{"ok":true}"#.utf8))
 
     case ("GET", "/ready"):
-        // Unauthenticated probes get a boolean only. The full bootstrap report names
-        // adjudicator and store internals; that is behind the bearer token.
         let ready = report.lexiconsSealed && (report.tier3Available || env["WAYZYY_TIER3"] == "off")
         status = ready ? 200 : 503
         if authenticate(request) != nil {
@@ -159,11 +125,6 @@ func route(_ request: HTTPRequest) -> HTTPResponse {
         return .error(401, "missing or invalid bearer token")
     }
 
-    // Prefer identity over address: addresses are shared behind NAT, so limiting by address
-    // alone would let one noisy tenant throttle everyone sharing its egress.
-    // Only the write path is limited. GET /metrics and GET /v1/decision are how ops and the
-    // chat backend recover after a burst; putting them in the same bucket 429s scrapes and
-    // lookups exactly when they are needed.
     if request.method == "POST" {
         let limit = limiter.admit(caller == "anonymous" ? request.peer : caller)
         guard limit.allowed else {
@@ -207,8 +168,6 @@ func route(_ request: HTTPRequest) -> HTTPResponse {
             status = verdict.ok ? 200 : 400
             return encodeJSON(verdict, status: status)
         } catch {
-            // A decision the store never saw cannot be appealed or reconciled, so it must not
-            // be returned as though it had been recorded.
             Metrics.shared.recordStoreFailure()
             Log.emit(["event": "store_failure", "caller": caller, "error": "\(error)"])
             status = 503
@@ -265,7 +224,6 @@ func route(_ request: HTTPRequest) -> HTTPResponse {
     }
 }
 
-// MARK: - Run
 
 let bindHost = env["WAYZYY_BIND"] ?? "0.0.0.0"
 
@@ -283,10 +241,6 @@ do {
     exit(75)   // EX_TEMPFAIL — the port is unavailable, which may be transient
 }
 
-// Adjudication continues after a response is sent, so a rolling update that exits the instant
-// SIGTERM arrives abandons judgements on exactly the messages the deterministic tiers were least
-// certain about. Drain them, bounded, then leave. The orchestrator's grace period has to exceed
-// this window, which is why the manifest pairs it with a preStop delay.
 let shutdown = DispatchSource.makeSignalSource(signal: SIGTERM, queue: .global())
 shutdown.setEventHandler {
     let drained = WayzyyModerationService.drainAdjudications(timeout: 20)

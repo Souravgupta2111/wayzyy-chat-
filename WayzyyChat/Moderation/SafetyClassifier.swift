@@ -1,8 +1,5 @@
-// Layer 3 contract: multi-label safety heads, calibration bands, the signal-derived default and a remote backend.
 
 import Foundation
-// URLSession lives in FoundationNetworking on Linux. Without this the file compiles on macOS
-// and fails in a container, which is the worst possible place to discover it.
 #if canImport(FoundationNetworking)
 import FoundationNetworking
 #endif
@@ -115,7 +112,6 @@ struct SafetyClassifierInput {
     let addressesPerson: Bool
     let conditionalDemand: Bool
     let propertyDirected: Bool
-    /// 0–1 structural prior from demand + reputation + exchange (or implied threat).
     let reviewBargainScore: Double
 }
 
@@ -165,8 +161,6 @@ final class SignalDerivedSafetyClassifier: SafetyClassifier {
         if input.propertyDirected { complaint = input.addressesPerson ? 0.58 : 0.72 }
         if input.innocentSimilarity >= 0.30 { complaint = Swift.max(complaint, input.innocentSimilarity) }
         if input.deterministicFindings.contains(where: { $0.confidence >= 0.90 }) { complaint = 0 }
-        // A review-for-money shape is not a complaint. Leave the veto off so the
-        // coercion head can route to the classifier / Tier 3.
         if input.reviewBargainScore >= 0.55 { complaint = 0 }
         out.set(.legitimateComplaint, complaint)
 
@@ -182,7 +176,6 @@ final class RemoteSafetyClassifier: SafetyClassifier {
         var timeout: TimeInterval = 0.25
         var apiKey: String? = nil
         var wireFormat: WireFormat = .wayzyy
-        /// Only used by formats that name a model in the request body.
         var model: String? = nil
         var calibration: SafetyCalibration = {
             var c = SafetyCalibration.default
@@ -190,15 +183,6 @@ final class RemoteSafetyClassifier: SafetyClassifier {
             return c
         }()
 
-        /// OpenAI's moderation endpoint as a routing signal.
-        ///
-        /// Deliberately routing-only: `enforcementEnabled` stays false regardless of how
-        /// confident the provider is. A third party's opinion is evidence for asking a question,
-        /// never authority to withhold someone's message — the same rule the local heuristic and
-        /// the learned router live under.
-        ///
-        /// The timeout is generous compared to the local default because nothing waits on it: a
-        /// cache miss returns local scores immediately and this refreshes in the background.
         static func openAIModeration(apiKey: String,
                                      model: String = "omni-moderation-latest") -> Configuration {
             var config = Configuration(
@@ -220,8 +204,6 @@ final class RemoteSafetyClassifier: SafetyClassifier {
     let identifier: String
     var calibration: SafetyCalibration { configuration.calibration }
 
-    /// Whether the classifier used on a cache miss or during an outage is permitted to
-    /// enforce. Must be false: degradation may reduce authority, never increase it.
     var fallbackCanEnforce: Bool { fallback.calibration.enforcementEnabled }
 
     private let configuration: Configuration
@@ -234,8 +216,6 @@ final class RemoteSafetyClassifier: SafetyClassifier {
     private var cache: [String: CacheEntry] = [:]
     private var inFlight: Set<String> = []
 
-    /// Calibration used when the remote endpoint is unavailable. Exposed so the
-    /// degradation invariant can be asserted by a test rather than assumed.
     var fallbackCalibration: SafetyCalibration { fallback.calibration }
 
     init(configuration: Configuration, session: URLSession = .shared) {
@@ -243,32 +223,11 @@ final class RemoteSafetyClassifier: SafetyClassifier {
         self.session = session
         self.identifier = "remote-classifier-\(configuration.endpoint.host ?? "local")"
 
-        // Degradation must reduce authority, never increase it. The fallback produces
-        // uncalibrated heuristic scores, so it is explicitly stripped of enforcement
-        // authority — it may route, it may never enforce. Previously this inherited
-        // `configuration.calibration`, which is enforcement-enabled, meaning a remote
-        // outage would have *granted* the local heuristic the power to act.
         var routingOnly = configuration.calibration
         routingOnly.enforcementEnabled = false
         self.fallback = SignalDerivedSafetyClassifier(calibration: routingOnly)
     }
 
-    /// Classify without ever waiting on the network.
-    ///
-    /// Layer 3 sits on the synchronous write path, where the entire tier model depends on it
-    /// being effectively free. Blocking a worker for up to `timeout` per message contradicts
-    /// that: on a shared service it converts a fast deterministic path into a queue, and one
-    /// slow endpoint becomes a platform-wide latency incident.
-    ///
-    /// So the remote score is treated as a *cache*, not a dependency:
-    ///
-    ///   * a cached score for this exact canonical text is returned immediately;
-    ///   * otherwise the local signal-derived score is returned immediately, and a refresh is
-    ///     dispatched in the background for next time.
-    ///
-    /// This is sound because Layer 3 only routes. A first-sighting message is routed on local
-    /// signals, and anything genuinely ambiguous reaches Tier 3, which is where a model is
-    /// permitted to be slow because it runs off the write path.
     func classify(_ input: SafetyClassifierInput) -> SafetyScores {
         if let cached = cachedScores(for: input.text) {
             return SafetyScores(source: identifier + "-cached", latencyMs: 0, scores: cached)
@@ -279,12 +238,9 @@ final class RemoteSafetyClassifier: SafetyClassifier {
         stateLock.unlock()
         if !coolingDown { refreshInBackground(input.text) }
 
-        // Local scores, immediately. Calibrated routing-only, so a cache miss can never
-        // enforce on the strength of a heuristic.
         return fallback.classify(input)
     }
 
-    // MARK: - Cache
 
     private struct CacheEntry {
         let scores: [SafetyHead: Double]
@@ -308,8 +264,6 @@ final class RemoteSafetyClassifier: SafetyClassifier {
     private func store(_ scores: [SafetyHead: Double], for text: String) {
         stateLock.lock()
         if cache.count >= Self.cacheLimit {
-            // Cheap bound: drop the oldest quarter rather than maintaining an LRU, since a
-            // miss costs only a local classification.
             let oldest = cache.sorted { $0.value.at < $1.value.at }
                 .prefix(Self.cacheLimit / 4)
                 .map(\.key)
@@ -360,21 +314,8 @@ final class RemoteSafetyClassifier: SafetyClassifier {
         WireFormat.wayzyy.parse(data)
     }
 
-    /// How to talk to a scoring endpoint.
-    ///
-    /// This exists so a second provider is a *format*, not a second classifier. Everything that
-    /// makes this class safe on the write path — the cache, the background refresh, the circuit
-    /// breaker, the routing-only fallback — was difficult to get right and is covered by
-    /// invariants. A parallel implementation would inherit none of it and would need all of
-    /// those properties re-established and re-asserted.
     enum WireFormat {
-        /// Our own shape: `{"text": ...}` in, a flat map of head names to scores out.
         case wayzyy
-        /// OpenAI's moderation endpoint. Free at time of writing and multilingual, which makes
-        /// it worth having — but it is a free endpoint with no SLA from a vendor that deprecates
-        /// things, so it belongs here as an interchangeable secondary rather than as the thing
-        /// the system depends on. The most widely used free toxicity API in the industry
-        /// announced its shutdown while this was being built; that is the risk being managed.
         case openAIModeration
 
         func requestBody(text: String, model: String?) -> [String: Any] {
@@ -416,11 +357,6 @@ final class RemoteSafetyClassifier: SafetyClassifier {
                     if let n = raw[key] as? NSNumber { return n.doubleValue }
                     return 0
                 }
-                // Several provider categories map onto one head, so take the strongest rather
-                // than the last one read. `harassment` and `hate` are kept separate upstream but
-                // both land on harassment here; the distinction between insulting a person and
-                // insulting their group is drawn by our own discrimination rule, which needs the
-                // exclusion construction rather than a score.
                 var out: [SafetyHead: Double] = [:]
                 func raise(_ head: SafetyHead, _ v: Double) {
                     out[head] = Swift.max(out[head] ?? 0, v)
@@ -438,17 +374,11 @@ final class RemoteSafetyClassifier: SafetyClassifier {
                 raise(.selfHarm, value("self-harm"))
                 raise(.selfHarm, value("self-harm/intent"))
                 raise(.selfHarm, value("self-harm/instructions"))
-                // No provider category corresponds to coercion, scam, or a legitimate
-                // complaint. Leaving them unset matters: writing a zero would look like
-                // positive evidence of innocence and could suppress the complaint veto, which
-                // is what protects a guest's right to complain bluntly.
                 return out.values.contains(where: { $0 > 0 }) ? out : nil
             }
         }
     }
 
-    /// Circuit breaker. Three consecutive failures stop background refreshes for 30 seconds,
-    /// so a dead endpoint costs one dispatched request per message rather than a storm.
     private func noteFailure(reason: String) {
         stateLock.lock()
         consecutiveFailures += 1
@@ -500,8 +430,6 @@ extension SafetyCalibration {
         let band = band(for: head, score: score)
         guard band != .allow else { return out }
 
-        // Complaint veto does not apply to coercion: "refund or I review" is often
-        // property-directed, which would otherwise look like a legitimate complaint.
         let vetoed = scores.legitimateComplaint >= complaintVeto && head != .coercion
         if vetoed { out.complaintVetoed = true }
 

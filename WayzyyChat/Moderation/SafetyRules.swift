@@ -1,4 +1,3 @@
-// Deterministic safety floor for threats, harassment, sexual content, self-harm, scams and brand impersonation.
 
 import Foundation
 
@@ -10,8 +9,6 @@ enum SafetyRules {
         let phrase: String
         let range: Range<Int>
 
-        /// Typed decision attributes. Present when the deciding rule established them,
-        /// so a reviewer can see *why* the finding stands, not only that it does.
         var lever: LeverClass? = nil
         var target: TargetClass? = nil
     }
@@ -24,16 +21,10 @@ enum SafetyRules {
         "review-threat",
         #"(?:bad|negative|1|one)\s*(?:star)?\s*review\s*(?:unless|if\s+you|until\s+you)"#
     )
-    // The verb list is deliberately broad. Precision comes from the lever gate, not from
-    // this pattern: "or i will report you" matches here and is then discarded because
-    // reporting is a lawful remedy. Widening the conditional therefore costs no precision
-    // and buys recall on phrasings we have not seen.
     private static let refundExtortRX = RX(
         "refund-extort",
         #"(?:refund|discount|free|money\s+back|pay\s+me)[^.!?]{0,40}?or\s+i(?:'?ll|\s+will)\s+(?:report|review|rate|complain|leave|tell|call|post|share|expose|contact|inform|trash|damage|ruin|destroy|wreck|break)"#
     )
-    /// Structural bargain: a concession and a reputation lever with an exchange
-    /// connective somewhere between them. Not a quote of any particular message.
     private static let reviewBargainRX = RX(
         "review-bargain",
         #"(?:(?:refund|waive|comp|discount|fee|paisa|%\s*(?:back|off)|quietly|penalty).{0,100}(?:\bor\b|\bunless\b|\bif\b|warna|varna|nahi+n?\s+toh?|nhi+\s+toh?|still|stays|exchange).{0,80}(?:review|rating|stars?)|(?:review|rating|stars?).{0,100}(?:\bor\b|\bunless\b|\bif\b|warna|varna|nahi+n?\s+toh?|nhi+\s+toh?|still|stays|quietly|waive|refund|comp)|(?:don'?t\s+want|wouldn'?t\s+want|you(?:'ll|\s+will)\s+regret).{0,80}(?:review|rating))"#
@@ -157,8 +148,6 @@ enum SafetyRules {
             alpha.originalRange(tokens[index].start, tokens[index].end)
         }
 
-        // Multi-word slurs ("neech jaat", "bihari kutta") cannot be caught by token
-        // comparison, so the phrase forms are checked against the joined text first.
         let joined = words.joined(separator: " ")
         for phrase in Lex.slurTerms where phrase.contains(" ") && joined.contains(phrase) {
             let upper = max(1, (alpha.offsets.last ?? 0) + 1)
@@ -166,8 +155,6 @@ enum SafetyRules {
                            phrase: "slur", range: 0..<upper, target: .group)
         }
 
-        // Spelling variants, via the phonetic skeleton. Short skeletons are discarded when
-        // the set is built, so this cannot reintroduce the `tatti` → "t" class of collision.
         let skeletonWords = Set(words.map { HinglishFold.skeleton($0) })
         if SlurLexicon.matchesSkeleton(skeletonWords) {
             let upper = max(1, (alpha.offsets.last ?? 0) + 1)
@@ -318,18 +305,8 @@ enum SafetyRules {
         }
     }
 
-    // Skeleton sets, folded once at load. One entry covers every spelling of a word and
-    // both scripts, because Devanagari is transliterated before folding.
     private static let indicProfanitySkeletons = HinglishFold.skeletonSet(Lex.profanityIndic)
 
-    /// Romanised-Hindi and Devanagari profanity, matched in skeleton space so spelling
-    /// variance costs nothing. The target rule still applies: profanity aimed at the
-    /// property is a crude review, not abuse.
-    ///
-    /// Targets are deliberately checked on the **surface** form, not in skeleton space.
-    /// Target terms are short — `tu` reduces to `"t"`, `tera` to `"tr"` — so folding them
-    /// would let ordinary words like `to` and `the` satisfy the person requirement and
-    /// quietly disable the rule that makes this whole layer safe.
     private static func skeletonProfanity(_ skeleton: CharView, surface: String) -> Finding? {
         guard !skeleton.isEmpty else { return nil }
         let skeletonWords = Set(skeleton.text.split(separator: " ").map(String.init))
@@ -376,8 +353,6 @@ enum SafetyRules {
         if let abuse = profanity(alpha: alpha, alphaCompact: alphaCompact) {
             findings.append(abuse)
         } else if let skeleton, let abuse = skeletonProfanity(skeleton, surface: text) {
-            // Only consulted when the surface-form pass found nothing, so the skeleton
-            // view adds recall on unseen spellings without changing existing verdicts.
             findings.append(abuse)
         }
 
@@ -412,11 +387,6 @@ enum SafetyRules {
         }
         scan(Lex.scamPhrases, .scam, 0.82)
 
-        // Coercion is a two-part test: a conditional demand AND illegitimate leverage.
-        // A conditional demand paired with a lawful remedy — an honest review, a platform
-        // report, a bank dispute, a police report of a real crime — is a customer
-        // exercising a right and produces no finding. The conditional still raises a
-        // router suspicion, so genuinely novel leverage reaches Tier 3 for adjudication.
         let leverClass = LeverTaxonomy.classify(text)
         if leverClass == .illegitimate {
             scan(Lex.coercionPhrases, .coercion, 0.78)
@@ -431,9 +401,6 @@ enum SafetyRules {
                 }
             }
 
-            // Taxonomy already established illegitimate leverage. Do not require the
-            // wording to also match a canned phrase — that overfits eval sets and
-            // misses the next paraphrase.
             if findings.first(where: { $0.category == .coercion }) == nil {
                 let span = 0..<max(1, min(text.count, 120))
                 let orig = base.originalRange(span.lowerBound, span.upperBound) ?? span
@@ -445,7 +412,6 @@ enum SafetyRules {
             }
         }
 
-        // Stamp the established lever on every coercion finding so the reason is auditable.
         findings = findings.map { f in
             guard f.category == .coercion, f.lever == nil else { return f }
             var out = f

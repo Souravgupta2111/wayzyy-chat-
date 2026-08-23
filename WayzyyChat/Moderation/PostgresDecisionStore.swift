@@ -1,46 +1,3 @@
-// Postgres-backed DecisionStore via the Supabase REST API.
-//
-// Why Supabase REST and not a native Postgres driver
-// ──────────────────────────────────────────────────
-// The package has no external dependencies, and keeping that constraint means the gate
-// runs offline on every build, on every machine, with no `swift package resolve`. A native
-// Postgres driver (PostgresNIO, Vapor Fluent) would need Package.swift to declare a
-// dependency and a network call to resolve it.
-//
-// The Supabase REST API is standard HTTPS. Foundation's URLSession handles it, which is
-// already in the binary. The trade-off: one extra round-trip to confirm a transaction rather
-// than a single pipelined statement, and slightly higher latency than a persistent TCP
-// connection. At the call volumes this store handles — decisions, not messages — neither
-// matters.
-//
-// Schema (run this once in Supabase SQL editor)
-// ─────────────────────────────────────────────
-//   create table if not exists mod_decisions (
-//     request_id    text primary key,
-//     conversation_id text not null,
-//     sender_id     text not null,
-//     decision      jsonb not null,
-//     recorded_at   timestamptz not null default now()
-//   );
-//
-//   create table if not exists mod_outbox (
-//     id            text primary key,
-//     request_id    text not null,
-//     kind          text not null,
-//     subject       text not null,
-//     occurred_at   timestamptz not null,
-//     delivered     boolean not null default false
-//   );
-//
-//   -- Index for the replay query (events since a cutoff, used on startup).
-//   create index if not exists mod_outbox_occurred_at
-//     on mod_outbox (occurred_at) where not delivered;
-//
-//   -- Row-level security: the service role key bypasses RLS, so you can leave it
-//   -- enabled on both tables and add user-facing policies separately without
-//   -- changing anything here.
-//   alter table mod_decisions enable row level security;
-//   alter table mod_outbox     enable row level security;
 
 import Foundation
 
@@ -50,15 +7,10 @@ import FoundationNetworking
 
 public final class PostgresDecisionStore: DecisionStore {
 
-    // MARK: - Configuration
 
     public struct Configuration {
-        /// `https://<project>.supabase.co`
         public var projectURL: URL
-        /// Service role key. Has write access and bypasses RLS. Never expose to clients.
         public var serviceRoleKey: String
-        /// Network timeout for each REST call. Decisions are on the write path so keep
-        /// this short — the file store fallback is the recovery, not a long wait.
         public var timeout: TimeInterval = 5
 
         public init(projectURL: URL, serviceRoleKey: String, timeout: TimeInterval = 5) {
@@ -67,10 +19,6 @@ public final class PostgresDecisionStore: DecisionStore {
             self.timeout = timeout
         }
 
-        /// Read from environment variables — the standard Supabase pattern.
-        ///
-        /// Set `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY` in your container's
-        /// environment or in a mounted secret file.
         public static func fromEnvironment() -> Configuration? {
             let env = ProcessInfo.processInfo.environment
             guard let raw = env["SUPABASE_URL"],
@@ -81,20 +29,17 @@ public final class PostgresDecisionStore: DecisionStore {
         }
     }
 
-    // MARK: - State
 
     private let config: Configuration
     private let session: URLSession
     private let encoder: JSONEncoder
     private let decoder: JSONDecoder
 
-    // In-process LRU so reads (idempotency lookups) do not always go to the network.
     private let cacheLock = NSLock()
     private var cache: [String: DecisionEnvelope] = [:]
     private var lru: [String] = []
     private let maxCacheEntries = 10_000
 
-    // MARK: - Init
 
     public init(configuration: Configuration) {
         self.config = configuration
@@ -109,7 +54,6 @@ public final class PostgresDecisionStore: DecisionStore {
         self.decoder.dateDecodingStrategy = .iso8601
     }
 
-    // MARK: - DecisionStore
 
     public func commit(_ envelope: DecisionEnvelope, event: OutboxEvent) throws {
         _ = try commitIfAbsent(envelope, event: event)
@@ -128,8 +72,6 @@ public final class PostgresDecisionStore: DecisionStore {
         ]
         try postgresUpsert(table: "mod_decisions", row: row)
 
-        // The row that actually exists is the canonical decision — a concurrent writer may
-        // have landed first under ignore-duplicates.
         guard let stored = decision(forRequestID: envelope.requestID) else {
             throw DecisionStoreError.notWritable("decision insert did not round-trip")
         }
@@ -137,8 +79,6 @@ public final class PostgresDecisionStore: DecisionStore {
         do {
             try commitEvent(event)
         } catch {
-            // Two REST calls cannot be a SQL transaction. Roll the decision back so a 503
-            // means "neither was recorded" rather than "decision without an outbox event".
             try? postgresDelete(table: "mod_decisions",
                                 query: "request_id=\(Self.pgEq(envelope.requestID))")
             cacheLock.lock()
@@ -156,7 +96,6 @@ public final class PostgresDecisionStore: DecisionStore {
         if let existing = decision(forRequestID: envelope.requestID) {
             if existing.decision.isReservation,
                Date().timeIntervalSince(existing.recordedAt) > 15 {
-                // Steal expired reservation by patching only while still pending.
                 if try postgresPatchPending(envelope) {
                     remember(envelope)
                     return (true, envelope)
@@ -205,7 +144,6 @@ public final class PostgresDecisionStore: DecisionStore {
             throw DecisionStoreError.notWritable("finalize did not round-trip")
         }
         if stored.decision.isReservation {
-            // Lost the pending patch; insert as a fresh commit if the row vanished.
             return try commitIfAbsent(envelope, event: event)
         }
         return stored
@@ -326,7 +264,6 @@ public final class PostgresDecisionStore: DecisionStore {
     }
 
     public var committedDecisions: Int {
-        // HEAD with count=exact — Supabase returns it in the Content-Range header.
         let url = config.projectURL.appendingPathComponent("rest/v1/mod_decisions")
         var req = baseRequest(url: url)
         req.httpMethod = "HEAD"
@@ -336,11 +273,9 @@ public final class PostgresDecisionStore: DecisionStore {
               let http = response as? HTTPURLResponse,
               let range = http.value(forHTTPHeaderField: "Content-Range")
         else { return 0 }
-        // Format: "0-0/1234"
         return Int(range.split(separator: "/").last ?? "") ?? 0
     }
 
-    // MARK: - Private helpers
 
     private func baseRequest(url: URL) -> URLRequest {
         var req = URLRequest(url: url)
@@ -413,7 +348,6 @@ public final class PostgresDecisionStore: DecisionStore {
         ]
     }
 
-    /// PATCH only while the stored action is still the reservation placeholder.
     @discardableResult
     private func postgresPatchPending(_ envelope: DecisionEnvelope) throws -> Bool {
         let url = config.projectURL.appendingPathComponent("rest/v1/mod_decisions")
@@ -452,9 +386,6 @@ public final class PostgresDecisionStore: DecisionStore {
         return (try? JSONSerialization.jsonObject(with: data) as? [[String: Any]]) ?? []
     }
 
-    /// Synchronous wrapper around URLSession. The store is called from synchronous
-    /// contexts (the write path in ModerationService), so we have to block. The timeout
-    /// on the session configuration bounds how long we block.
     private func syncRequest(_ request: URLRequest) throws -> (Data, URLResponse) {
         var resultData: Data?
         var resultResponse: URLResponse?
@@ -474,7 +405,6 @@ public final class PostgresDecisionStore: DecisionStore {
         return (data, response)
     }
 
-    // MARK: - Row deserialisers
 
     private func decisionFromRow(_ row: [String: Any]) -> DecisionEnvelope? {
         guard let requestID = row["request_id"] as? String,

@@ -1,37 +1,7 @@
-// Durable storage for decisions, and the outbox that tells the rest of the platform about them.
-//
-// Why a decision has to be written down
-// ─────────────────────────────────────
-// `DecisionRecord` gave decisions a *format*. This gives them a *home*. Without one the service
-// holds every decision, report and block in memory, so a restart — a deploy, a crash, a node
-// eviction — silently erases the platform's entire enforcement history. Three things break:
-//
-//   * Appeals. "Why was my message withheld?" has no answer if the answer was in a dead pod.
-//   * Behavioural detection. Reports and blocks are the highest-precision evidence the system
-//     has and the only label source in a design with no human review tier. Losing them resets
-//     every repeat offender to a clean slate on every deploy.
-//   * Idempotency. A client that retries a timed-out request gets a second evaluation instead
-//     of the original decision, so a retry can change an outcome.
-//
-// Two design choices worth stating plainly.
-//
-// **Commit is one operation, not two.** A decision that is stored without its outbox event is
-// invisible to the rest of the platform; an event emitted without its decision points at
-// nothing. `commit` therefore takes both and is required to persist them together or neither. A
-// SQL implementation satisfies this with a transaction. The file implementation satisfies it by
-// writing a single line and flushing it, which is why the record and event share one envelope.
-//
-// **Durability is the interface's promise, not the caller's problem.** `commit` is declared
-// `throws` and callers are expected to treat a failure as a failure — a decision that could not
-// be recorded must not be delivered as though it had been. That is the one place this design
-// deliberately fails closed on infrastructure rather than on content.
 
 import Foundation
 
-/// A decision plus the identifiers needed to find it again.
 public struct DecisionEnvelope: Codable, Equatable {
-    /// The client's idempotency key. A retry carrying the same value must return the stored
-    /// decision rather than produce a new one.
     public var requestID: String
     public var conversationID: String
     public var senderID: String
@@ -51,22 +21,17 @@ public struct DecisionEnvelope: Codable, Equatable {
     }
 }
 
-/// Something the rest of the platform needs to know about, published at least once.
 public struct OutboxEvent: Codable, Equatable {
     public enum Kind: String, Codable {
         case decision
         case report
         case block
-        /// A Tier 3 adjudication of an earlier decision. Published as its own event because the
-        /// message has already been delivered by the time it arrives — the platform has to act
-        /// on it (retract, warn, raise risk) rather than simply record it.
         case adjudication
     }
 
     public var id: String
     public var requestID: String
     public var kind: Kind
-    /// For a decision, the action taken. For a recipient signal, the sender it concerns.
     public var subject: String
     public var occurredAt: Date
     public var delivered: Bool
@@ -99,46 +64,28 @@ public enum DecisionStoreError: Error, CustomStringConvertible {
 
 public protocol DecisionStore: AnyObject {
 
-    /// Persist a decision and its outbox event together, or neither.
-    ///
-    /// Throwing means the decision was not recorded. Callers must not treat the message as
-    /// decided: an unrecorded decision cannot be appealed, audited or reconciled.
     func commit(_ envelope: DecisionEnvelope, event: OutboxEvent) throws
 
-    /// Insert only if this `requestID` has not been stored. Returns the canonical envelope —
-    /// the one already stored if a concurrent writer won, otherwise `envelope`.
     func commitIfAbsent(_ envelope: DecisionEnvelope, event: OutboxEvent) throws -> DecisionEnvelope
 
-    /// Claim an idempotency key before evaluation. `acquired` means this process should evaluate;
-    /// otherwise return the stored envelope (wait if it is still a reservation).
     func reserve(_ envelope: DecisionEnvelope) throws -> (acquired: Bool, envelope: DecisionEnvelope)
 
-    /// Replace a reservation with the real decision and its outbox event. If another replica
-    /// already finalised, returns theirs and does not overwrite.
     func finalize(_ envelope: DecisionEnvelope, event: OutboxEvent) throws -> DecisionEnvelope
 
-    /// Persist a recipient signal's outbox event. Reports and blocks change enforcement
-    /// posture, so they are durable for the same reasons decisions are.
     func commit(event: OutboxEvent) throws
 
-    /// The stored decision for an idempotency key, if this request was already decided.
     func decision(forRequestID requestID: String) -> DecisionEnvelope?
 
-    /// Events not yet published, oldest first.
     func pendingEvents(limit: Int) -> [OutboxEvent]
 
     func markDelivered(_ ids: [String]) throws
 
-    /// Events inside a window, oldest first. Used to rebuild behavioural state after a restart.
     func events(since: Date) -> [OutboxEvent]
 
     var committedDecisions: Int { get }
 }
 
-// MARK: - In-memory
 
-/// The default. Correct for the app and for tests, and explicitly not durable — which is why a
-/// deployment is expected to install something else and why startup reports which one is active.
 public final class InMemoryDecisionStore: DecisionStore {
 
     private let lock = NSLock()
@@ -247,15 +194,7 @@ public final class InMemoryDecisionStore: DecisionStore {
     }
 }
 
-// MARK: - Append-only file
 
-/// A durable store with no external dependency: one JSON object per line, appended and flushed.
-///
-/// This exists so that "decisions survive a restart" is true out of the box rather than
-/// contingent on a database being provisioned first. It is a single-writer store — one process
-/// per log file — because concurrent appends from multiple processes can interleave mid-line.
-/// A deployment that outgrows that implements `DecisionStore` against its own database; nothing
-/// above this line changes when it does.
 public final class FileDecisionStore: DecisionStore {
 
     private struct Line: Codable {
@@ -290,8 +229,6 @@ public final class FileDecisionStore: DecisionStore {
         }
         self.handle = h
 
-        // Replay what is already there, so the index and the outbox reflect history rather
-        // than only what this process has written.
         if let data = fm.contents(atPath: path) {
             for raw in data.split(separator: UInt8(ascii: "\n")) where !raw.isEmpty {
                 guard let line = try? decoder.decode(Line.self, from: Data(raw)) else { continue }
@@ -310,8 +247,6 @@ public final class FileDecisionStore: DecisionStore {
         }
         data.append(UInt8(ascii: "\n"))
         handle.write(data)
-        // Flush before returning. Without this a decision is "recorded" only in a page cache
-        // and a power loss reverts it, which is precisely the case durability is claimed for.
         handle.synchronizeFile()
     }
 
@@ -388,8 +323,6 @@ public final class FileDecisionStore: DecisionStore {
     }
 
     public func markDelivered(_ ids: [String]) throws {
-        // Delivery is recorded as a new line rather than by rewriting history: an append-only
-        // log that gets edited in place is no longer an audit trail.
         let set = Set(ids)
         lock.lock()
         defer { lock.unlock() }
@@ -414,7 +347,6 @@ public final class FileDecisionStore: DecisionStore {
     }
 }
 
-/// Serialises work that shares an idempotency key inside one process.
 final class KeyedLock {
     private let cond = NSCondition()
     private var held: Set<String> = []

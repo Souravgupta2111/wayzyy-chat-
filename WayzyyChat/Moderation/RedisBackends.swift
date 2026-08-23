@@ -1,33 +1,3 @@
-// Redis-backed ActorSignalBackend and ConversationBufferBackend.
-//
-// Why a raw socket and not a Redis client library
-// ────────────────────────────────────────────────
-// Adding a Swift Redis client (RediStack, Vapor Redis) would require Package.swift to declare
-// an external dependency. The package is deliberately dependency-free so the invariant gate
-// runs with no network and no `swift package resolve`. A raw RESP2 implementation is ~150
-// lines and covers exactly the commands these backends need.
-//
-// Why Redis (not Postgres) for these two backends
-// ───────────────────────────────────────────────
-// Both stores are high-frequency and write-heavy: every message that routes updates actor
-// signals, every delivered message writes to the conversation buffer. Postgres can handle
-// this, but each write would be a round-trip through the Supabase REST API — a JSON
-// serialise, an HTTPS request, and a wait. Redis handles it in sub-millisecond round trips
-// over a persistent connection, which is the right trade for state that changes per message.
-//
-// The data model
-// ─────────────
-// Actor signals: `mod:actor:<senderID>` — JSONB blob, SET with EX=86400 (24 h TTL).
-// Conversation buffers: `mod:buf:<conversationID>|<senderID>` — JSONB blob, SET with EX=900.
-// TTL handles expiry without a separate cleanup job. The prune-on-read logic in the store
-// layer is a second line of defence but not load-bearing.
-//
-// Deployment
-// ──────────
-// Set REDIS_URL=redis://:<password>@<host>:6379 (or rediss:// for TLS).
-// Supabase has a managed Upstash Redis add-on; any Redis-compatible endpoint works.
-// If REDIS_URL is absent, the factory in ServiceAPI.bootstrap() falls back to the
-// in-memory defaults, so removal of the env var is a clean revert.
 
 import Foundation
 
@@ -40,13 +10,7 @@ import Darwin
 import Security
 #endif
 
-// MARK: - RESP2 client
 
-/// Minimal RESP2 over a synchronous TCP socket. Covers SET, GET, DEL, PING.
-///
-/// Synchronous by design — both backends are called from synchronous contexts and need to
-/// block until the round-trip is complete. The latency is ~1 ms on a co-located Redis, which
-/// is less than the per-message evaluation cost and not a practical bottleneck.
 final class RESPClient {
 
     struct Configuration {
@@ -80,7 +44,6 @@ final class RESPClient {
 
     deinit { disconnect() }
 
-    // MARK: Commands
 
     func set(key: String, value: String, ttlSeconds: Int? = nil) throws {
         var args: [String] = ["SET", key, value]
@@ -104,8 +67,6 @@ final class RESPClient {
         return false
     }
 
-    /// Compare-and-set via Lua so concurrent mutates on this shared socket cannot interleave
-    /// WATCH/MULTI, and there is no unwatched last-resort write.
     func compareAndSet(key: String, expected: String, value: String, ttlSeconds: Int) throws -> Bool {
         let r = try command(["EVAL", Self.casLua, "1", key, expected, value, "\(ttlSeconds)"])
         if case .integer(let n) = r { return n == 1 }
@@ -157,7 +118,6 @@ final class RESPClient {
         }
     }
 
-    // MARK: - RESP types
 
     enum RESPValue {
         case simple(String)
@@ -167,7 +127,6 @@ final class RESPClient {
         case error(String)
     }
 
-    // MARK: - Low level
 
     private func connect() throws {
         if fd >= 0 { disconnect() }
@@ -230,7 +189,6 @@ final class RESPClient {
         if !alreadyLocked { lock.lock() }
         defer { if !alreadyLocked { lock.unlock() } }
 
-        // Reconnect if needed.
         if fd < 0 { try connect() }
 
         try ioWrite(Array(encode(args).utf8))
@@ -340,8 +298,6 @@ private func DarwinOrGlibcConnect(_ sock: Int32, _ addr: UnsafePointer<sockaddr>
 }
 #endif
 
-/// TLS wrapper for `rediss://`. Apple uses Secure Transport; Linux uses libssl via dlopen
-/// so the iOS app target does not link OpenSSL.
 final class RedisTLS {
     private let fd: Int32
     #if os(Linux)
@@ -439,7 +395,6 @@ final class RedisTLS {
                 spins += 1
                 continue
             }
-            // SecureTransport: handshake pauses so we can evaluate the chain (not in Swift overlay).
             if status == OSStatus(-9841) {
                 var trust: SecTrust?
                 SSLCopyPeerTrust(ctx, &trust)
@@ -591,9 +546,7 @@ enum OpenSSL {
 }
 #endif
 
-// MARK: - Redis ActorSignalBackend
 
-/// Actor signals in Redis. Key: `mod:actor:<senderID>`, value: JSON, TTL: 24 h.
 public final class RedisActorSignalBackend: ActorSignalBackend {
 
     private let client: RESPClient
@@ -635,7 +588,6 @@ public final class RedisActorSignalBackend: ActorSignalBackend {
 
     public var trackedSenderCount: Int { 0 } // requires SCAN; omitted
 
-    /// Ping the Redis server. Used at bootstrap to prove the connection.
     public func ping() -> Bool {
         (try? client.ping()) ?? false
     }
@@ -647,9 +599,7 @@ public final class RedisActorSignalBackend: ActorSignalBackend {
     }
 }
 
-// MARK: - Redis ConversationBufferBackend
 
-/// Conversation buffers in Redis. Key: `mod:buf:<key>`, value: JSON, TTL: 15 min.
 public final class RedisConversationBufferBackend: ConversationBufferBackend {
 
     private let client: RESPClient
@@ -690,8 +640,6 @@ public final class RedisConversationBufferBackend: ConversationBufferBackend {
     public func removeAll() { /* requires SCAN */ }
 
     public func evict(before cutoff: Date, maxConversations: Int) {
-        // TTLs handle expiry server-side. The in-memory eviction logic does not apply here
-        // because Redis expires keys automatically when the TTL elapses.
     }
 
     public var trackedCount: Int { 0 } // requires SCAN; omitted
@@ -703,7 +651,6 @@ public final class RedisConversationBufferBackend: ConversationBufferBackend {
     }
 }
 
-/// Conversation booking context in Redis. Key: `mod:ctx:<conversationID>`, TTL: 30 days.
 public final class RedisConversationContextBackend: ConversationContextBackend {
 
     private let client: RESPClient

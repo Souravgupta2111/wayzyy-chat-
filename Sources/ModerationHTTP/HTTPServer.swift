@@ -1,29 +1,3 @@
-// A small HTTP/1.1 server on POSIX sockets.
-//
-// Why not a web framework
-// ───────────────────────
-// `Package.swift` has no external dependencies, and that is load-bearing rather than
-// decorative: it is why the invariant gate runs with no network, no package resolution and no
-// full Xcode toolchain, on any machine. Adding Hummingbird or Vapor to expose four routes would
-// trade that away for request routing this file can do in a few hundred lines.
-//
-// The scope is deliberately narrow, because a general-purpose HTTP server is a large security
-// surface and this needs almost none of it. Supported: HTTP/1.1, fixed `Content-Length` bodies,
-// one request per connection. Not supported, and rejected rather than half-handled: chunked
-// transfer encoding, pipelining, keep-alive, upgrades, TLS. TLS terminates at the ingress, which
-// is where it belongs — a service that also terminates TLS has to be redeployed to rotate a
-// certificate.
-//
-// Hardening choices worth naming:
-//
-//   * A read timeout on every socket. Without one, a client that opens a connection and sends
-//     nothing occupies a worker forever, which is a denial of service that costs the attacker
-//     one socket and needs no traffic at all.
-//   * A bounded worker pool with a bounded accept queue. Unbounded concurrency converts a
-//     traffic spike into an out-of-memory kill, which is strictly worse than refusing some
-//     requests: refusing is visible and recoverable.
-//   * Body size checked against `Content-Length` *before* reading the body, so an oversized
-//     request is refused without allocating room for it.
 
 import Foundation
 import WayzyyModeration
@@ -69,9 +43,6 @@ final class HTTPServer {
     private let port: UInt16
     private let bindHost: String
     private let maxConcurrent: Int
-    /// Accepted connections allowed to wait for a worker. Sized well above `maxConcurrent`
-    /// because each request finishes in single-digit milliseconds, so a burst that waits
-    /// briefly is served correctly — while an unbounded queue would just defer the failure.
     private let maxQueued: Int
     private let readTimeout: TimeInterval
     private let handler: (HTTPRequest) -> HTTPResponse
@@ -113,8 +84,6 @@ final class HTTPServer {
         listenFD = socket(AF_INET, streamType, 0)
         guard listenFD >= 0 else { throw ServerError.socketFailed("socket() failed") }
 
-        // Without SO_REUSEADDR a restart fails for the duration of TIME_WAIT, which turns every
-        // deploy into a minute of downtime.
         var yes: Int32 = 1
         setsockopt(listenFD, SOL_SOCKET, SO_REUSEADDR, &yes, socklen_t(MemoryLayout<Int32>.size))
 
@@ -136,18 +105,6 @@ final class HTTPServer {
             close(listenFD)
             throw ServerError.socketFailed("bind() failed on port \(port) — errno \(errno)")
         }
-        // The backlog is deliberately much larger than the worker pool.
-        //
-        // Workers are bounded so that concurrency cannot exhaust memory, which means the accept
-        // loop pauses while all workers are busy. Connections then wait in the kernel's queue —
-        // and if that queue is small, the kernel *resets* the overflow instead of queueing it.
-        //
-        // A reset is the wrong way to shed load. The client sees a transport error rather than a
-        // status code, so it cannot tell "you are overloaded, retry" from "you are broken", and
-        // a moderation client that cannot tell those apart will either drop the message or spin.
-        // Since each request completes in single-digit milliseconds, a burst that queues briefly
-        // is served correctly; a burst that is reset is not. Measured: 500 simultaneous
-        // connections were reset at a backlog of 128 and are served at 1024.
         let backlog = Int32(max(1024, maxConcurrent * 16))
         guard listen(listenFD, backlog) == 0 else {
             close(listenFD)
@@ -155,26 +112,6 @@ final class HTTPServer {
         }
     }
 
-    /// Accept forever. Blocks the calling thread.
-    ///
-    /// The shape here is deliberate, and it was chosen after load testing showed the obvious
-    /// version failing badly. Three properties, in order of importance:
-    ///
-    /// **Accept eagerly.** Earlier this loop blocked waiting for a free worker before calling
-    /// `accept`, so during a burst connections piled up in the kernel's queue — and once that
-    /// filled, the kernel *reset* the overflow. 500 simultaneous messages produced hundreds of
-    /// transport errors. A reset is the worst way to shed load, because the client cannot tell
-    /// "retry, I am busy" from "I am broken". Accepting immediately keeps that queue drained and
-    /// moves the decision into this process, where it can be answered properly.
-    ///
-    /// **Shed with a status code.** Past the queue bound, the connection gets `503` and a
-    /// `Retry-After` rather than being dropped. That is a instruction a client can act on.
-    ///
-    /// **A fixed worker pool, not a thread per request.** Workers block on I/O, so dispatching
-    /// each connection onto a concurrent queue would grow one thread per blocked request — the
-    /// thread explosion that bounded concurrency was meant to prevent. A fixed set of threads
-    /// consuming a bounded queue makes both limits explicit: `maxConcurrent` requests execute at
-    /// once, `maxQueued` wait, and everything beyond is refused politely.
     func serve() {
         let pending = NSCondition()
         var queued: [(fd: Int32, peer: String)] = []
@@ -216,7 +153,6 @@ final class HTTPServer {
             pending.lock()
             if queued.count >= maxQueued {
                 pending.unlock()
-                // Refuse in a way the caller can reason about, then close.
                 var response = HTTPResponse.error(503, "server busy, retry shortly")
                 response.extraHeaders["Retry-After"] = "1"
                 write(clientFD, response)
@@ -244,8 +180,6 @@ final class HTTPServer {
 
     private func handleConnection(_ fd: Int32, peer: String) {
         guard let request = readRequest(fd, peer: peer) else {
-            // Malformed or timed out. Answer rather than hanging up silently, so a
-            // misconfigured client sees why.
             write(fd, .error(400, "malformed request"))
             return
         }
@@ -257,8 +191,6 @@ final class HTTPServer {
         var chunk = [UInt8](repeating: 0, count: 4_096)
         var headerEnd: Int? = nil
 
-        // Phase 1: headers. Capped independently of the body cap — a client that streams
-        // headers forever must not be able to grow this buffer without limit.
         let maxHeaderBytes = 16_384
         while headerEnd == nil {
             let n = recv(fd, &chunk, chunk.count, 0)
@@ -286,15 +218,12 @@ final class HTTPServer {
             headers[name] = value
         }
 
-        // Chunked bodies are refused rather than misparsed: silently treating a chunked body as
-        // a literal one would let a caller smuggle content past the size cap.
         if let encoding = headers["transfer-encoding"], encoding.lowercased().contains("chunked") {
             return nil
         }
 
         let declared = Int(headers["content-length"] ?? "0") ?? 0
         guard declared >= 0, declared <= ModerationLimits.maxRequestBytes else {
-            // Signalled as a request rather than nil so the caller can answer 413 specifically.
             return HTTPRequest(method: parts[0], path: parts[1], headers: headers,
                                body: Data("__oversized__".utf8), peer: peer)
         }
@@ -324,8 +253,6 @@ final class HTTPServer {
         var head = "HTTP/1.1 \(response.status) \(Self.reason(response.status))\r\n"
         head += "Content-Type: \(response.contentType)\r\n"
         head += "Content-Length: \(response.body.count)\r\n"
-        // One request per connection. Keep-alive would mean tracking connection state and
-        // pipelining, and the ingress already pools connections upstream.
         head += "Connection: close\r\n"
         for (name, value) in response.extraHeaders { head += "\(name): \(value)\r\n" }
         head += "\r\n"

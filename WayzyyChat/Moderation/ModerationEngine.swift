@@ -1,21 +1,13 @@
-// Orchestrates the tiers: canonicalisation, extraction, retrieval, safety classification, fusion, policy, routing and Tier-3 revision.
 
 import Foundation
 
 final class ModerationEngine {
 
     static let shared: ModerationEngine = {
-        // The slur set is loaded before the first evaluation. An empty slur set silently
-        // disables the highest-confidence rule in the engine, so this is deliberately not
-        // left to a caller to remember.
         _ = SlurLexicon.bootstrap
         _ = NativeScriptSafety.register
         let engine = ModerationEngine()
-        // Weights are optional: absent, the engine behaves exactly as it did before the router
-        // existed rather than refusing to start.
         engine.abuseRouter = AbuseRouter.discover()
-        // Both extensions are in. Seal before anything can be evaluated, so the lists are
-        // provably final by the time they are read without synchronisation. See Lex.seal.
         Lex.seal()
         return engine
     }()
@@ -23,26 +15,7 @@ final class ModerationEngine {
     private let canonicalizer = Canonicalizer()
     private let scorer = Scorer()
 
-    // MARK: - Swappable dependencies
-    //
-    // These are replaceable at runtime: a deployment installs a real adjudicator at startup,
-    // moves actor state to a shared store, or reloads configuration without a restart. That
-    // makes them shared mutable state on a request path that runs concurrently, and the
-    // consequences are not hypothetical — the identical pattern on `Policy.current` produced a
-    // torn read and a segfault under the concurrency invariant.
-    //
-    // Two properties are needed, and a lock alone only provides the first:
-    //
-    //   1. No read may observe a half-written value. A lock gives this.
-    //   2. One evaluation must see one configuration. A lock does *not* give this: a single
-    //      evaluation reads the classifier four times and the retriever five, so a swap
-    //      landing mid-evaluation could pair one classifier's scores with another's
-    //      calibration and produce a verdict that never corresponded to any real config.
-    //
-    // So callers take a `Dependencies` snapshot once and use it throughout, exactly as they
-    // already do with the policy snapshot.
 
-    /// An immutable view of the engine's dependencies, consistent as of one instant.
     struct Dependencies {
         let retriever: SemanticRetriever
         let actorSignals: ActorSignalStore
@@ -51,11 +24,6 @@ final class ModerationEngine {
         let abstainBand: ClosedRange<Double>
         let tier2Enabled: Bool
 
-        /// Whether a real adjudicator is reachable.
-        ///
-        /// `FixtureJudge` is an offline stub, so its presence means Tier 3 cannot actually
-        /// answer. The distinction matters because the fail-closed guarantee depends on
-        /// knowing the difference between "the model said allow" and "there is no model".
         var tier3Available: Bool { !(judge is FixtureJudge) }
     }
 
@@ -68,7 +36,6 @@ final class ModerationEngine {
     private var _abstainBand: ClosedRange<Double> = 0.10...0.62
     private var _tier2Enabled = true
 
-    /// Take all dependencies under one lock. Reading them individually would defeat the point.
     func dependencies() -> Dependencies {
         configLock.lock()
         defer { configLock.unlock() }
@@ -87,8 +54,6 @@ final class ModerationEngine {
         set { configLock.lock(); _retriever = newValue; configLock.unlock() }
     }
 
-    /// Replaceable so a deployment can move actor state to a shared store. See
-    /// ActorSignalBackend for why per-replica actor memory understates risk.
     var actorSignals: ActorSignalStore {
         get { configLock.lock(); defer { configLock.unlock() }; return _actorSignals }
         set { configLock.lock(); _actorSignals = newValue; configLock.unlock() }
@@ -106,12 +71,6 @@ final class ModerationEngine {
 
     var tier3Available: Bool { dependencies().tier3Available }
 
-    /// The learned abuse router, if weights were found at bootstrap.
-    ///
-    /// Set once during initialisation and never mutated, so reads need no lock — the same
-    /// treatment as the sealed lexicons, and for the same reason: this is consulted on every
-    /// message. Absent weights mean the engine behaves exactly as it did before the router
-    /// existed, which is why loading is allowed to fail quietly.
     private(set) var abuseRouter: AbuseRouter?
 
     var abstainBand: ClosedRange<Double> {
@@ -133,8 +92,6 @@ final class ModerationEngine {
     static let safetyChunkOverlap = 120
     static let safetyMaxChunks = 10
 
-    /// Replaceable so a deployment can move cross-message state to a shared store. Guarded by
-    /// the same lock as the other dependencies: installing a backend races live evaluations.
     private var _buffers = ConversationBuffers()
 
     var buffers: ConversationBuffers {
@@ -146,20 +103,11 @@ final class ModerationEngine {
         buffers.remember(text, actor: actor)
     }
 
-    // MARK: - Recipient signals
-    //
-    // Reports and blocks are the cheapest, highest-precision evidence available: unprompted,
-    // recipient-generated, and free. They are also the only label source in a design with no
-    // human review tier, so they are first-class inputs rather than tickets. A report also
-    // lowers the behavioural pattern bar from three sub-threshold hits to two, which is why
-    // leaving these unwired quietly disabled part of Layer 6.
 
-    /// Record that a recipient reported this sender.
     func report(sender: String, at now: Date = Date()) {
         actorSignals.recordReport(against: sender, at: now)
     }
 
-    /// Record that a recipient blocked this sender.
     func block(sender: String, at now: Date = Date()) {
         actorSignals.recordBlock(of: sender, at: now)
     }
@@ -172,7 +120,6 @@ final class ModerationEngine {
         actorSignals.platformPriors(for: sender)
     }
 
-    /// Current behavioural risk for a sender, for surfacing in ops tooling.
     func behaviouralRisk(sender: String, conversation: String) -> ActorRisk {
         actorSignals.risk(for: sender, conversation: conversation)
     }
@@ -196,13 +143,8 @@ final class ModerationEngine {
     ) -> Verdict {
         let started = DispatchTime.now().uptimeNanoseconds
 
-        // One immutable read of the active policy, at request entry. Everything downstream
-        // uses this snapshot, so a config change cannot land halfway through and produce a
-        // verdict that matches no policy version that ever existed.
         let policy = Policy.snapshot()
 
-        // Same reasoning for the swappable dependencies: taken once, used throughout, so a
-        // classifier or retriever swap cannot be observed halfway through one evaluation.
         let deps = dependencies()
 
         let trimmed = original.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -637,6 +579,7 @@ final class ModerationEngine {
         let addressesPersonForClassifier = EscalationAnalyser.addressesPerson(views.alpha)
             || EscalationAnalyser.addressesPersonNativeScript(analysed)
         let bargain = LeverTaxonomy.bargainSignals(in: analysed)
+        // Translates raw sigmoid scores into categorical safety findings based on the calibration profile
         var classification = deps.safetyClassifier.classify(SafetyClassifierInput(
             text: analysed,
             deterministicFindings: safety.findings,
@@ -649,8 +592,6 @@ final class ModerationEngine {
             propertyDirected: Self.mentionsProperty(views.alpha),
             reviewBargainScore: bargain.coercionPrior
         ))
-        // Same prior on the remote path: OpenAI has no coercion head, so without this
-        // a paraphrase would never route.
         if bargain.coercionPrior > 0 {
             classification.raise(.coercion, to: bargain.coercionPrior)
         }
@@ -794,19 +735,10 @@ final class ModerationEngine {
             finalScore = max(finalScore, 0.75)
         }
 
-        // ── The learned abuse router.
-        //
-        // Scored on the original text, because obfuscation is signal here rather than noise:
-        // `ch00tiye` is a deliberate misspelling and the model was trained to see it.
-        //
-        // It contributes a suspicion and nothing else. It does not touch `finalAction`,
-        // `finalScore` or any finding, so it cannot enforce, cannot mask, and cannot withhold —
-        // its entire effect is that Tier 3 gets asked. That matters because it is tuned for
-        // recall on unseen abuse, so it will be wrong in the over-flagging direction, and the
-        // price of being wrong has to stay at one model call.
         var learnedAbuseSignal = false
         if !advisoryOnly, let router = abuseRouter {
             let routerScore = router.score(original)
+            // Triggers escalation if the lightweight n-gram router flags a character-level structural anomaly
             if routerScore >= router.threshold {
                 learnedAbuseSignal = true
                 reasonCodes.append(String(format: "LEARNED_ABUSE(%.2f)", routerScore))
@@ -819,11 +751,7 @@ final class ModerationEngine {
             let safetySignal = classification.strongestViolation?.score ?? 0
             let actedOnSafety = !safetyFindings.isEmpty
                 && finalAction != .allow && finalAction != .hint
-            // A message whose only leverage is a lawful remedy must not accumulate toward a
-            // behavioural pattern. Otherwise a guest who complains repeatedly — each time
-            // citing a right they actually hold — is eventually promoted to review by
-            // Layer 6, which is enforcement by another route. Same exclusion the complaint
-            // veto already applies.
+            // Prevents lawful complaints (like threatening a 1-star review) from incrementing behavioural abuse counters
             let lawfulRemedyOnly = LeverTaxonomy.classify(analysed) == .lawful
             let patternEligible = layer3.shouldRoute
                 && classification.legitimateComplaint < deps.safetyClassifier.calibration.complaintVeto
@@ -880,9 +808,6 @@ final class ModerationEngine {
                 provisionalHold = true
                 reasonCodes.append("PROVISIONAL_HOLD")
 
-                // Safety fails closed. No adjudicator and no human queue: block rather than
-                // deliver. Scoped to threat and sexual — not every safety route — so ordinary
-                // ambiguity (an angry review) is not converted into enforcement.
                 if !deps.tier3Available, finalAction.rank < ModAction.block.rank {
                     finalAction = .block
                     finalScore = max(finalScore, 0.65)
@@ -976,16 +901,8 @@ final class ModerationEngine {
         message: String,
         actor: ActorContext
     ) -> Verdict {
+        // Enforces safety fail-closed guarantees when the LLM adjudicator fails to return a conclusive judgement
         if judgement.decision == .abstain {
-            // `learnedAbuse` belongs here for the same reason the other two do: it means
-            // something asked for a second opinion and did not get one.
-            //
-            // Without it, a message the router flagged and the adjudicator failed to judge —
-            // a rate limit, a timeout, a rejected parameter — was delivered untouched.
-            // Measured: "Chal chutiye" routed at 0.93, the judgement failed, and it went out
-            // as `allow`. The router's flag is the only evidence there is at that point, so
-            // discarding it is failing open on precisely the messages the deterministic tiers
-            // could not read.
             let safetyShaped = verdict.suspicions.contains(.learnedAbuse)
             guard safetyShaped, verdict.action == .allow || verdict.action == .hint else {
                 return verdict
@@ -1000,9 +917,6 @@ final class ModerationEngine {
                 maskedText: "", redactedRanges: [],
                 transformsApplied: verdict.transformsApplied,
                 obfuscationEffort: verdict.obfuscationEffort,
-                // A revision is still a decision, so it must name the policy that
-                // bounded it. The memberwise default of "" would leave adjudicated
-                // verdicts — the ones most likely to be appealed — unattributable.
                 policyVersion: verdict.policyVersion
             )
             held.judgement = JudgementRecord(
@@ -1084,9 +998,6 @@ final class ModerationEngine {
                 redactedRanges: [],
                 transformsApplied: verdict.transformsApplied,
                 obfuscationEffort: verdict.obfuscationEffort,
-                // A revision is still a decision, so it must name the policy that
-                // bounded it. The memberwise default of "" would leave adjudicated
-                // verdicts — the ones most likely to be appealed — unattributable.
                 policyVersion: verdict.policyVersion
             )
         }
@@ -1116,9 +1027,6 @@ final class ModerationEngine {
                 maskedText: message, redactedRanges: [],
                 transformsApplied: verdict.transformsApplied,
                 obfuscationEffort: verdict.obfuscationEffort,
-                // A revision is still a decision, so it must name the policy that
-                // bounded it. The memberwise default of "" would leave adjudicated
-                // verdicts — the ones most likely to be appealed — unattributable.
                 policyVersion: verdict.policyVersion
             )
         }
