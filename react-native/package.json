@@ -1,0 +1,19 @@
+{
+  "name": "@wayzyy/moderation-engine",
+  "version": "1.0.0",
+  "description": "Wayzyy on-device moderation engine (TypeScript port of the Swift engine)",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "react-native": "./src/index.ts",
+  "scripts": {
+    "build": "tsc",
+    "clean": "rm -rf dist",
+    "typecheck": "tsc --noEmit"
+  },
+  "license": "UNLICENSED",
+  "private": true,
+  "devDependencies": {
+    "ts-node": "^10.9.2",
+    "typescript": "^7.0.2"
+  }
+}
