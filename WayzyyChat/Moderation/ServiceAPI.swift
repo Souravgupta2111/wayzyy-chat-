@@ -103,6 +103,7 @@ public struct ModerationVerdictDTO: Codable, Sendable {
     public var error: String?
     public var displayAction: String?
     public var displayText: String?
+    public var source: String?
 
     public init(id: String? = nil, ok: Bool, error: String? = nil) {
         self.id = id; self.ok = ok; self.error = error
@@ -134,6 +135,8 @@ public enum WayzyyModerationService {
     public static func installConversationContextBackend(_ backend: ConversationContextBackend) {
         contextStore = ConversationContextStore(backend: backend)
     }
+
+    public static var adjudicationSources: [String: String] = [:]
 
     public static func installURLReputationProvider(_ provider: URLReputationProvider) {
         URLReputation.provider = provider
@@ -859,6 +862,8 @@ extension WayzyyModerationService {
                     source: judgement.source,
                     latencyMs: judgement.latencyMs
                 )
+                
+                adjudicationSources[job.0] = judgement.source
 
                 recordAdjudicationCompleted(changed: outcome.changed)
 

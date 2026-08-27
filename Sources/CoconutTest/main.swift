@@ -66,8 +66,9 @@ print("cases: \(cases.count)\n")
 var score = 0
 var maxScore = 0
 var hits = 0
-var misses: [(id: String, expect: Bool, action: String, reasons: String, t3: String)] = []
+var misses: [(id: String, expect: Bool, action: String, reasons: String, t3: String, source: String)] = []
 var byCat: [String: (ok: Int, n: Int, pts: Int, max: Int)] = [:]
+var totalLlmCalls = 0
 
 for tc in cases {
     let pts = points(for: tc.id)
@@ -77,6 +78,7 @@ for tc in cases {
     var lastAction = "allow"
     var lastReasons: [String] = []
     var t3Note = "-"
+    var llmSource = "-"
 
     for (i, turn) in tc.turns.enumerated() {
         var req = ModerationRequestDTO(
@@ -91,6 +93,8 @@ for tc in cases {
         if verdict.escalationCandidate == true {
             _ = WayzyyModerationService.drainAdjudications(timeout: 25)
             if let adj = WayzyyModerationService.adjudication(forRequestID: req.id ?? "") {
+                totalLlmCalls += 1
+                llmSource = WayzyyModerationService.adjudicationSources[req.id ?? ""] ?? "unknown"
                 t3Note = "\(adj.action ?? "?")"
                 lastAction = adj.action ?? lastAction
                 lastReasons = adj.reasonCodes ?? lastReasons
@@ -111,16 +115,17 @@ for tc in cases {
         row.ok += 1
         row.pts += pts
     } else {
-        misses.append((tc.id, want, lastAction, lastReasons.joined(separator: ","), t3Note))
+        misses.append((tc.id, want, lastAction, lastReasons.joined(separator: ","), t3Note, llmSource))
     }
     byCat[tc.category] = row
     let mark = ok ? "OK" : "MISS"
-    print("\(mark) \(tc.id) wantFlag=\(want) got=\(lastAction) t3=\(t3Note) pts=\(ok ? pts : 0)/\(pts)")
+    print("\(mark) \(tc.id) wantFlag=\(want) got=\(lastAction) t3=\(t3Note) [\(llmSource)] pts=\(ok ? pts : 0)/\(pts)")
     fflush(stdout)
 }
 
 print("\n======== ROUND 2 RESULTS ========")
 print("engine: \(report.adjudicator)  tier3: \(report.tier3Available)  policy: \(report.policyVersion)")
+print("total LLM calls: \(totalLlmCalls)")
 print("cases: \(hits)/\(cases.count) correct")
 print("score: \(score)/\(maxScore)  (\(String(format: "%.1f", 100 * Double(score) / Double(max(maxScore, 1))))%)")
 print("\nby category:")
@@ -133,6 +138,6 @@ if misses.isEmpty {
     print("  none")
 } else {
     for m in misses {
-        print("  \(m.id) expectedFlag=\(m.expect) got=\(m.action) t3=\(m.t3) reasons=\(m.reasons)")
+        print("  \(m.id) expectedFlag=\(m.expect) got=\(m.action) t3=\(m.t3) source=\(m.source) reasons=\(m.reasons)")
     }
 }
