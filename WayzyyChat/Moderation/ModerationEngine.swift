@@ -903,8 +903,9 @@ final class ModerationEngine {
     ) -> Verdict {
         // Enforces safety fail-closed guarantees when the LLM adjudicator fails to return a conclusive judgement
         if judgement.decision == .abstain {
-            let safetyShaped = verdict.suspicions.contains(.learnedAbuse)
-            guard safetyShaped, verdict.action == .allow || verdict.action == .hint else {
+            let safetyShaped = verdict.suspicions.contains(.learnedAbuse) && verdict.score > 0.20
+            let tier2Routed = verdict.reasonCodes.contains(where: { $0.hasPrefix("LAYER3_ROUTE") })
+            guard safetyShaped || tier2Routed, verdict.action == .allow || verdict.action == .hint else {
                 return verdict
             }
             var reasons = verdict.reasonCodes

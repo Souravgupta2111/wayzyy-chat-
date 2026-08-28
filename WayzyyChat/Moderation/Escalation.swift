@@ -448,9 +448,15 @@ enum EscalationAnalyser {
         #"\bif\s+you\b[^.!?]{0,60}?\bi\s*(?:will|'?ll|am\s+going\s+to|shall)\b[^.!?]{0,60}?\b(?:you|your|u\b|ur)\b"#
     )
 
+    private static let reverseConditionalReprisalRX = RX(
+        "reverse-conditional-reprisal",
+        #"\bi\s*(?:won'?t|will\s+not)\b[^.!?]{0,60}?\bif\s+you\b"#
+    )
+
     static func conditionalDemand(_ text: String) -> Bool {
         !conditionalDemandRX.matches(in: text, limit: 1).isEmpty
             || !conditionalReprisalRX.matches(in: text, limit: 1).isEmpty
+            || !reverseConditionalReprisalRX.matches(in: text, limit: 1).isEmpty
     }
 
     private static let spacedDomainRX = try? NSRegularExpression(

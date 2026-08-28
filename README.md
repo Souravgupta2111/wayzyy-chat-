@@ -9,8 +9,6 @@ Those two problems need opposite instincts. Off-platform steering is mostly a st
 
 The engine is **9,815 lines across 25 files and imports nothing but Foundation** — no UIKit, no SwiftUI, no `@MainActor`. It is a pure function of `(text, conversation window, actor context)`, which is what makes it runnable in an iOS app, a Linux service or a CLI harness without a reimplementation.
 
-> **Read the full performance report**: [Coconut Round 2 (108/108 cases, 100%)](docs/coconut-round-2.md) covers the complete architecture, test attribution, real production latency metrics, and LLM scaling costs per 100,000 messages.
-
 ---
 
 ## How it works
