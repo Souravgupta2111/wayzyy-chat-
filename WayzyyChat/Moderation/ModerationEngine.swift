@@ -186,6 +186,35 @@ final class ModerationEngine {
         let suppressedOnly = maskedPhones.isEmpty && !rawPhones.isEmpty && !launderedPhone
         detections += maskedPhones.isEmpty ? rawPhones : maskedPhones
 
+        // Dispersed number-words carrier: attacker spreads digits as words across long filler
+        // to defeat the span check (length*7+16). The Netflix test "two ... eight ... two ...
+        // four ... three ... nine ..." → digits=="2824397942" spans 195 chars, so the normal
+        // `phones` call rejects it (10*7+16=86 < 195) despite being a valid phone shape.
+        // Fall back to a relaxed span when the digit stream was derived from number words.
+        if detections.filter({ $0.category == .phone }).isEmpty,
+           views.allTransforms.contains("number-words"),
+           views.digits.text.count >= 10 {
+            let relaxedMasked = Extractors.phones(digitView: views.digitsMasked, suppressed: false, effort: effort, spanMultiplier: 120)
+            let relaxedRaw = Extractors.phones(digitView: views.digits, suppressed: !launderedPhone, effort: effort, spanMultiplier: 120)
+            var relaxed = relaxedMasked.isEmpty ? relaxedRaw : relaxedMasked
+            if relaxed.isEmpty, views.digits.text.count >= 10, views.digits.text.count <= 15 {
+                // Ultimate fallback: entire digit stream forms a phone regardless of dispersion.
+                // Use the full stream if it validates, covering the whole message.
+                let stream = views.digits.text
+                if Extractors.isHighConfidencePhone(stream) || Extractors.phones(digitView: views.digits, suppressed: false, effort: effort, spanMultiplier: 400).first != nil {
+                    // Re-run with huge span to get proper range/confidence
+                    relaxed = Extractors.phones(digitView: views.digits, suppressed: !launderedPhone, effort: effort, spanMultiplier: 400)
+                    if relaxed.isEmpty {
+                        relaxed = Extractors.phones(digitView: views.digitsMasked, suppressed: false, effort: effort, spanMultiplier: 400)
+                    }
+                }
+            }
+            relaxed = relaxed.map { d in
+                Detection(category: d.category, range: d.range, surface: d.surface, canonical: d.canonical, confidence: d.confidence * 0.92, transforms: d.transforms + ["dispersed-number-words"], effort: d.effort + 1, reason: d.reason + "; dispersed across message")
+            }
+            detections += relaxed
+        }
+
         if detections.filter({ $0.category == .phone }).isEmpty, signals.hasContactIntent {
             let stream = views.digitsMasked.text.isEmpty
                 ? views.digits.text
